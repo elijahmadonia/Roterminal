@@ -2,6 +2,8 @@ import { createServer } from 'node:http'
 import { access, readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import {
   BOARD_CACHE_TTL_MS,
   DB_PATH,
@@ -44,6 +46,7 @@ const CHART_RANGE_MS = {
 const GAME_ICON_CACHE_TTL_MS = 5 * 60 * 1000
 
 const LIVE_DISCOVERY_CACHE_TTL_MS = Math.min(PLATFORM_CACHE_TTL_MS, 5_000)
+const execFileAsync = promisify(execFile)
 
 function getPlatformStatsCacheTtlMs(range) {
   switch (range) {
@@ -712,6 +715,74 @@ async function fetchJsonWithOptions(url, options = {}, retries = MAX_FETCH_RETRI
   }
 
   throw lastError ?? new Error('Unknown fetch failure')
+}
+
+async function fetchJsonWithCurl(url, { method = 'GET', headers = {}, body = null } = {}, retries = MAX_FETCH_RETRIES) {
+  let attempt = 0
+  let lastError = null
+
+  while (attempt <= retries) {
+    const args = [
+      '--silent',
+      '--show-error',
+      '--location',
+      '--request',
+      method,
+      '--url',
+      url,
+      '--write-out',
+      '\n%{http_code}',
+      '--max-time',
+      String(Math.max(1, Math.ceil(REQUEST_TIMEOUT_MS / 1_000))),
+    ]
+
+    for (const [name, value] of Object.entries(headers)) {
+      args.push('--header', `${name}: ${value}`)
+    }
+
+    if (body != null) {
+      args.push('--data', body)
+    }
+
+    try {
+      const { stdout, stderr } = await execFileAsync('curl', args, {
+        maxBuffer: 2 * 1024 * 1024,
+      })
+
+      const lastNewlineIndex = stdout.lastIndexOf('\n')
+      const rawBody = lastNewlineIndex === -1 ? stdout : stdout.slice(0, lastNewlineIndex)
+      const rawStatus = lastNewlineIndex === -1 ? '' : stdout.slice(lastNewlineIndex + 1).trim()
+      const statusCode = Number.parseInt(rawStatus, 10)
+
+      if (!Number.isFinite(statusCode)) {
+        throw new Error(`curl returned an unreadable status code for ${url}: ${stderr || stdout}`)
+      }
+
+      if (statusCode < 200 || statusCode >= 300) {
+        const error = new Error(`Request failed ${statusCode}: ${rawBody}`)
+        error.statusCode = statusCode
+        throw error
+      }
+
+      return JSON.parse(rawBody)
+    } catch (error) {
+      lastError = error
+      const statusCode = error?.statusCode
+      const isRetryable =
+        statusCode === 429 ||
+        error?.code === 'ETIMEDOUT' ||
+        error?.code === 'ECONNRESET'
+
+      if (!isRetryable || attempt === retries) {
+        throw error
+      }
+
+      await sleep(RETRY_BASE_DELAY_MS * 2 ** attempt)
+      attempt += 1
+    }
+  }
+
+  throw lastError ?? new Error('Unknown curl failure')
 }
 
 function readCache(cache, key) {
@@ -2401,7 +2472,7 @@ async function fetchFullPlatformStats(range = '24h') {
   const { startDatetime, endDatetime } = buildPlatformStatsWindow(range)
 
   try {
-    const response = await fetchJsonWithOptions(
+    const response = await fetchJsonWithCurl(
       FULL_PLATFORM_STATS_URL,
       {
         method: 'POST',
