@@ -82,6 +82,10 @@ The backend can be tuned with `.env`:
 - `ROTERMINAL_INGEST_STALE_AFTER_MS`: marks ingest unhealthy if no successful run lands within this window, default `max(interval x 3, 20m)`
 - `ROTERMINAL_SNAPSHOT_RETENTION_DAYS`: local history retention window, default `30`
 - `ROTERMINAL_REQUEST_TIMEOUT_MS`: upstream Roblox request timeout, default `8000`
+- `ROBLOX_SECURITY_COOKIE`: optional single `.ROBLOSECURITY` cookie for one Roblox seed account
+- `ROBLOX_SECURITY_COOKIES`: optional newline-separated `.ROBLOSECURITY` cookies for multiple Roblox seed accounts
+
+Without a Roblox security cookie, the app only covers public Explore/Discover feeds. With one or more seed-account cookies, the backend also calls Roblox's authenticated Home recommendations endpoint and merges those universes into the tracked board, which materially increases coverage for games that surface on Home but not in the public sort set. Use burner accounts, not production owner accounts.
 
 ## Production
 

@@ -5,6 +5,7 @@ import {
   INGEST_LEASE_TTL_MS,
   INGEST_INTERVAL_MS,
   MAX_FETCH_RETRIES,
+  ROBLOX_SECURITY_COOKIES,
   RETRY_BASE_DELAY_MS,
   REQUEST_TIMEOUT_MS,
   TRACKED_UNIVERSE_CAP,
@@ -20,6 +21,13 @@ const PLATFORM_SORT_IDS = [
   'top-revisited',
 ]
 const PLATFORM_GAME_BATCH_SIZE = 50
+const ROBLOX_AUTH_COOKIE_HEADERS = [...new Set(
+  ROBLOX_SECURITY_COOKIES.map((cookieValue) =>
+    cookieValue.includes('.ROBLOSECURITY=')
+      ? cookieValue
+      : `.ROBLOSECURITY=${cookieValue}`,
+  ),
+)]
 
 const database = await createDatabase()
 await migrateLegacyJsonIfNeeded(database)
@@ -34,7 +42,18 @@ function sleep(ms) {
   })
 }
 
-async function fetchJson(url, retries = MAX_FETCH_RETRIES) {
+function buildRobloxAuthHeaders(cookieHeader, headers = {}) {
+  if (!cookieHeader) {
+    return headers
+  }
+
+  return {
+    ...headers,
+    cookie: cookieHeader,
+  }
+}
+
+async function fetchJson(url, retries = MAX_FETCH_RETRIES, init = undefined) {
   let attempt = 0
   let lastError = null
 
@@ -43,7 +62,10 @@ async function fetchJson(url, retries = MAX_FETCH_RETRIES) {
     const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
 
     try {
-      const response = await fetch(url, { signal: controller.signal })
+      const response = await fetch(url, {
+        ...init,
+        signal: controller.signal,
+      })
 
       if (!response.ok) {
         const body = await response.text()
@@ -190,13 +212,124 @@ async function fetchDiscoverSort(sortId) {
   )
 }
 
-async function fetchPlatformDiscoveryUniverseIds() {
-  const sortPayloads = await Promise.all(
-    PLATFORM_SORT_IDS.map(async (sortId) => ({
-      sortId,
-      payload: await fetchDiscoverSort(sortId),
-    })),
+function extractHomeRecommendationEntries(node, entriesByUniverseId = new Map()) {
+  if (Array.isArray(node)) {
+    node.forEach((item) => {
+      extractHomeRecommendationEntries(item, entriesByUniverseId)
+    })
+    return entriesByUniverseId
+  }
+
+  if (!node || typeof node !== 'object') {
+    return entriesByUniverseId
+  }
+
+  const candidateUniverseId = Number(node.universeId ?? node.contentId)
+  const contentType = typeof node.contentType === 'string' ? node.contentType.toLowerCase() : null
+  const isGameContent = contentType === 'game' || Number.isFinite(candidateUniverseId)
+
+  if (isGameContent && Number.isFinite(candidateUniverseId) && candidateUniverseId > 0) {
+    const current = entriesByUniverseId.get(candidateUniverseId) ?? {}
+    const next = {
+      universeId: candidateUniverseId,
+      rootPlaceId: Number(node.rootPlaceId) > 0 ? Number(node.rootPlaceId) : current.rootPlaceId,
+      name:
+        (typeof node.name === 'string' && node.name.trim().length > 0
+          ? node.name.trim()
+          : typeof node.title === 'string' && node.title.trim().length > 0
+            ? node.title.trim()
+            : current.name) ?? `Universe ${candidateUniverseId}`,
+      playerCount:
+        Number(node.playerCount ?? node.playing) >= 0
+          ? Number(node.playerCount ?? node.playing)
+          : (current.playerCount ?? 0),
+      totalUpVotes:
+        Number(node.totalUpVotes ?? node.upVotes) >= 0
+          ? Number(node.totalUpVotes ?? node.upVotes)
+          : (current.totalUpVotes ?? 0),
+      totalDownVotes:
+        Number(node.totalDownVotes ?? node.downVotes) >= 0
+          ? Number(node.totalDownVotes ?? node.downVotes)
+          : (current.totalDownVotes ?? 0),
+      creatorName:
+        (typeof node.creatorName === 'string' && node.creatorName.trim().length > 0
+          ? node.creatorName.trim()
+          : current.creatorName) ?? 'Unknown creator',
+      creatorId:
+        Number(node.creatorId) > 0 ? Number(node.creatorId) : (current.creatorId ?? 0),
+      creatorType:
+        (typeof node.creatorType === 'string' && node.creatorType.length > 0
+          ? node.creatorType
+          : current.creatorType) ?? 'User',
+      genre:
+        (typeof node.genre === 'string' && node.genre.length > 0
+          ? node.genre
+          : typeof node.contentMaturity === 'string' && node.contentMaturity.length > 0
+            ? `Maturity: ${node.contentMaturity}`
+            : current.genre) ?? 'Unclassified',
+    }
+
+    entriesByUniverseId.set(candidateUniverseId, next)
+  }
+
+  Object.values(node).forEach((value) => {
+    extractHomeRecommendationEntries(value, entriesByUniverseId)
+  })
+
+  return entriesByUniverseId
+}
+
+async function fetchHomeRecommendationEntries() {
+  if (ROBLOX_AUTH_COOKIE_HEADERS.length === 0) {
+    return []
+  }
+
+  const payloads = await Promise.all(
+    ROBLOX_AUTH_COOKIE_HEADERS.map((cookieHeader) =>
+      fetchJson(
+        'https://apis.roblox.com/discovery-api/omni-recommendation',
+        MAX_FETCH_RETRIES,
+        {
+          method: 'POST',
+          headers: buildRobloxAuthHeaders(cookieHeader, {
+            'content-type': 'application/json',
+          }),
+          body: JSON.stringify({
+            pageType: 'Home',
+            sessionId: crypto.randomUUID(),
+          }),
+        },
+      ),
+    ),
   )
+
+  const entriesByUniverseId = new Map()
+
+  payloads.forEach((payload) => {
+    ;(payload.sorts ?? []).forEach((sort) => {
+      extractHomeRecommendationEntries(sort, entriesByUniverseId)
+    })
+  })
+
+  return [...entriesByUniverseId.values()]
+}
+
+async function fetchPlatformDiscoveryEntries() {
+  const [sortPayloads, homeRecommendationEntries] = await Promise.all([
+    Promise.all(
+      PLATFORM_SORT_IDS.map(async (sortId) => ({
+        sortId,
+        payload: await fetchDiscoverSort(sortId),
+      })),
+    ),
+    fetchHomeRecommendationEntries().catch((error) => {
+      console.warn(
+        '[roterminal-worker] failed to fetch authenticated Roblox Home recommendations',
+        error,
+      )
+      return []
+    }),
+  ])
 
   const discoveredByUniverseId = new Map()
 
@@ -213,7 +346,56 @@ async function fetchPlatformDiscoveryUniverseIds() {
     }
   }
 
-  return [...discoveredByUniverseId.keys()]
+  for (const entry of homeRecommendationEntries) {
+    if (!discoveredByUniverseId.has(entry.universeId)) {
+      discoveredByUniverseId.set(entry.universeId, entry)
+    }
+  }
+
+  return [...discoveredByUniverseId.values()]
+}
+
+function mergeDiscoveredFallbackGames(fetchedGames, discoveryEntries) {
+  const gamesByUniverseId = new Map(fetchedGames.map((game) => [game.universeId, game]))
+  const fallbackTimestamp = new Date().toISOString()
+
+  discoveryEntries.forEach((entry) => {
+    if (gamesByUniverseId.has(entry.universeId)) {
+      return
+    }
+
+    const approval =
+      (entry.totalUpVotes ?? 0) + (entry.totalDownVotes ?? 0) > 0
+        ? ((entry.totalUpVotes ?? 0) / ((entry.totalUpVotes ?? 0) + (entry.totalDownVotes ?? 0))) * 100
+        : 0
+
+    gamesByUniverseId.set(entry.universeId, {
+      universeId: entry.universeId,
+      rootPlaceId: entry.rootPlaceId,
+      name: entry.name ?? `Universe ${entry.universeId}`,
+      description: '',
+      creatorName: entry.creatorName ?? 'Unknown creator',
+      creatorId: entry.creatorId ?? 0,
+      creatorType: entry.creatorType ?? 'User',
+      creatorHasVerifiedBadge: false,
+      genre: entry.genre ?? 'Unclassified',
+      genrePrimary: entry.genre ?? 'Unclassified',
+      genreSecondary: null,
+      playing: entry.playerCount ?? 0,
+      visits: 0,
+      favoritedCount: 0,
+      upVotes: entry.totalUpVotes ?? 0,
+      downVotes: entry.totalDownVotes ?? 0,
+      approval,
+      price: null,
+      maxPlayers: null,
+      created: fallbackTimestamp,
+      updated: fallbackTimestamp,
+      createVipServersAllowed: false,
+    })
+  })
+
+  return [...gamesByUniverseId.values()]
 }
 
 async function pollTrackedUniverses(trigger = 'worker') {
@@ -222,10 +404,14 @@ async function pollTrackedUniverses(trigger = 'worker') {
   try {
     const trackedUniverseIds = database.getTrackedUniverseIds()
     const trackedIds = trackedUniverseIds.length > 0 ? trackedUniverseIds : DEFAULT_TRACKED_IDS
-    const discoveredUniverseIds = await fetchPlatformDiscoveryUniverseIds()
+    const discoveredEntries = await fetchPlatformDiscoveryEntries()
+    const discoveredUniverseIds = discoveredEntries.map((entry) => entry.universeId)
     database.appendTrackedUniverseIds(discoveredUniverseIds, TRACKED_UNIVERSE_CAP)
     const snapshotUniverseIds = dedupeUniverseIds(trackedIds, discoveredUniverseIds)
-    const snapshotGames = await fetchUniverseGames(snapshotUniverseIds)
+    const snapshotGames = mergeDiscoveredFallbackGames(
+      await fetchUniverseGames(snapshotUniverseIds),
+      discoveredEntries,
+    )
     const observedAt = new Date().toISOString()
 
     database.recordSnapshots(snapshotGames, {

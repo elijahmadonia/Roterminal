@@ -17,6 +17,7 @@ import {
   ONE_HOUR_MS,
   PLATFORM_CACHE_TTL_MS,
   PORT,
+  ROBLOX_SECURITY_COOKIES,
   REQUEST_TIMEOUT_MS,
   RETRY_BASE_DELAY_MS,
   SEARCH_CACHE_TTL_MS,
@@ -155,6 +156,13 @@ const gamePageCache = new Map()
 const gameSupplementalCache = new Map()
 const gameIconRedirectCache = new Map()
 let lastBoardUniverseIds = []
+const ROBLOX_AUTH_COOKIE_HEADERS = [...new Set(
+  ROBLOX_SECURITY_COOKIES.map((cookieValue) =>
+    cookieValue.includes('.ROBLOSECURITY=')
+      ? cookieValue
+      : `.ROBLOSECURITY=${cookieValue}`,
+  ),
+)]
 
 const GENRE_BENCHMARKS = {
   simulator: {
@@ -556,7 +564,18 @@ async function serveStaticAsset(requestPath, response) {
   return true
 }
 
-async function fetchJson(url, retries = MAX_FETCH_RETRIES) {
+function buildRobloxAuthHeaders(cookieHeader, headers = {}) {
+  if (!cookieHeader) {
+    return headers
+  }
+
+  return {
+    ...headers,
+    cookie: cookieHeader,
+  }
+}
+
+async function fetchJson(url, retries = MAX_FETCH_RETRIES, init = undefined) {
   let attempt = 0
   let lastError = null
 
@@ -565,7 +584,10 @@ async function fetchJson(url, retries = MAX_FETCH_RETRIES) {
     const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
 
     try {
-      const response = await fetch(url, { signal: controller.signal })
+      const response = await fetch(url, {
+        ...init,
+        signal: controller.signal,
+      })
 
       if (!response.ok) {
         const body = await response.text()
@@ -1640,39 +1662,39 @@ function buildBoardPayload(
             : 'Database fallback active',
       detail:
         source === 'live'
-          ? `${formatCompactNumber(totalPlaying)} live players across ${enrichedGames.length} discovered experiences · 5 minute ingestion`
+          ? `${formatCompactNumber(totalPlaying)} live players across ${enrichedGames.length} indexed experiences · 5 minute ingestion`
           : source === 'cache'
-            ? `Using recent cached Roblox discovery data across ${enrichedGames.length} live experiences`
-            : `Serving ${enrichedGames.length} discovered experiences from SQLite snapshots while upstream is unavailable`,
+            ? `Using recent cached Roblox surface data across ${enrichedGames.length} live experiences`
+            : `Serving ${enrichedGames.length} indexed experiences from SQLite snapshots while upstream is unavailable`,
       tone: source === 'live' ? 'positive' : 'neutral',
     },
     metrics: [
       {
         label: 'Observed live CCU',
         value: formatCompactNumber(totalPlaying),
-        change: `${enrichedGames.length} games discovered`,
-        footnote: 'Aggregate concurrent users across live Roblox discovery sorts',
+        change: `${enrichedGames.length} games indexed`,
+        footnote: 'Aggregate concurrent users across the live Roblox surface set',
         tone: 'positive',
       },
       {
         label: 'Games indexed',
         value: formatWholeNumber(enrichedGames.length),
         change: `${platformMeta?.discoveredSorts?.length ?? PLATFORM_SORT_IDS.length} live sorts`,
-        footnote: 'Unique experiences currently covered from Roblox discovery feeds',
+        footnote: 'Unique experiences currently covered from Roblox discovery and Home feeds',
         tone: 'neutral',
       },
       {
         label: 'Genres indexed',
         value: formatWholeNumber(genres.length),
         change: genres[0]?.name ?? 'Unclassified',
-        footnote: 'Genre families represented in the discovered live universe set',
+        footnote: 'Genre families represented in the indexed live universe set',
         tone: 'neutral',
       },
       {
         label: 'Official platform scale',
         value: OFFICIAL_PLATFORM_SCALE.value,
         change: OFFICIAL_PLATFORM_SCALE.dateLabel,
-        footnote: 'Latest official Roblox concurrency milestone, separate from live discover coverage',
+        footnote: 'Latest official Roblox concurrency milestone, separate from current surface coverage',
         tone: 'positive',
       },
     ],
@@ -1796,8 +1818,140 @@ async function fetchDiscoverSort(sortId) {
   )
 }
 
+function extractHomeRecommendationEntries(node, entriesByUniverseId = new Map()) {
+  if (Array.isArray(node)) {
+    node.forEach((item) => {
+      extractHomeRecommendationEntries(item, entriesByUniverseId)
+    })
+    return entriesByUniverseId
+  }
+
+  if (!node || typeof node !== 'object') {
+    return entriesByUniverseId
+  }
+
+  const candidateUniverseId = Number(node.universeId ?? node.contentId)
+  const contentType = typeof node.contentType === 'string' ? node.contentType.toLowerCase() : null
+  const isGameContent = contentType === 'game' || Number.isFinite(candidateUniverseId)
+
+  if (isGameContent && Number.isFinite(candidateUniverseId) && candidateUniverseId > 0) {
+    const current = entriesByUniverseId.get(candidateUniverseId) ?? {}
+    const next = {
+      universeId: candidateUniverseId,
+      rootPlaceId: Number(node.rootPlaceId) > 0 ? Number(node.rootPlaceId) : current.rootPlaceId,
+      name:
+        (typeof node.name === 'string' && node.name.trim().length > 0
+          ? node.name.trim()
+          : typeof node.title === 'string' && node.title.trim().length > 0
+            ? node.title.trim()
+            : current.name) ?? `Universe ${candidateUniverseId}`,
+      playerCount:
+        Number(node.playerCount ?? node.playing) >= 0
+          ? Number(node.playerCount ?? node.playing)
+          : (current.playerCount ?? 0),
+      totalUpVotes:
+        Number(node.totalUpVotes ?? node.upVotes) >= 0
+          ? Number(node.totalUpVotes ?? node.upVotes)
+          : (current.totalUpVotes ?? 0),
+      totalDownVotes:
+        Number(node.totalDownVotes ?? node.downVotes) >= 0
+          ? Number(node.totalDownVotes ?? node.downVotes)
+          : (current.totalDownVotes ?? 0),
+      creatorName:
+        (typeof node.creatorName === 'string' && node.creatorName.trim().length > 0
+          ? node.creatorName.trim()
+          : current.creatorName) ?? 'Unknown creator',
+      creatorId:
+        Number(node.creatorId) > 0 ? Number(node.creatorId) : (current.creatorId ?? 0),
+      creatorType:
+        (typeof node.creatorType === 'string' && node.creatorType.length > 0
+          ? node.creatorType
+          : current.creatorType) ?? 'User',
+      genre:
+        (typeof node.genre === 'string' && node.genre.length > 0
+          ? node.genre
+          : typeof node.contentMaturity === 'string' && node.contentMaturity.length > 0
+            ? `Maturity: ${node.contentMaturity}`
+            : current.genre) ?? 'Unclassified',
+    }
+
+    entriesByUniverseId.set(candidateUniverseId, next)
+  }
+
+  Object.values(node).forEach((value) => {
+    extractHomeRecommendationEntries(value, entriesByUniverseId)
+  })
+
+  return entriesByUniverseId
+}
+
+async function fetchHomeRecommendationSet() {
+  if (ROBLOX_AUTH_COOKIE_HEADERS.length === 0) {
+    return {
+      games: [],
+      discoveredSorts: [],
+    }
+  }
+
+  const discoveredByUniverseId = new Map()
+  const discoveredSorts = []
+
+  const payloads = await Promise.all(
+    ROBLOX_AUTH_COOKIE_HEADERS.map((cookieHeader, index) =>
+      fetchJson(
+        'https://apis.roblox.com/discovery-api/omni-recommendation',
+        MAX_FETCH_RETRIES,
+        {
+          method: 'POST',
+          headers: buildRobloxAuthHeaders(cookieHeader, {
+            'content-type': 'application/json',
+          }),
+          body: JSON.stringify({
+            pageType: 'Home',
+            sessionId: randomUUID(),
+          }),
+        },
+      ).then((payload) => ({ index, payload })),
+    ),
+  )
+
+  for (const { index, payload } of payloads) {
+    for (const sort of payload.sorts ?? []) {
+      const sortEntries = [...extractHomeRecommendationEntries(sort).values()]
+      const baseSortId =
+        sort.topicId != null
+          ? `home-topic-${sort.topicId}`
+          : typeof sort.topic === 'string' && sort.topic.length > 0
+            ? `home-${sort.topic}`
+            : typeof sort.name === 'string' && sort.name.length > 0
+              ? `home-${sort.name}`
+              : 'home-recommendation'
+      const sortId = `${baseSortId}:seed-${index + 1}`
+
+      discoveredSorts.push({
+        sortId,
+        count: sortEntries.length,
+      })
+
+      sortEntries.forEach((entry) => {
+        if (!discoveredByUniverseId.has(entry.universeId)) {
+          discoveredByUniverseId.set(entry.universeId, {
+            ...entry,
+            sortId: baseSortId,
+          })
+        }
+      })
+    }
+  }
+
+  return {
+    games: [...discoveredByUniverseId.values()],
+    discoveredSorts,
+  }
+}
+
 async function fetchPlatformDiscoverySet() {
-  const cacheKey = PLATFORM_SORT_IDS.join(',')
+  const cacheKey = `${PLATFORM_SORT_IDS.join(',')}:home-seeds-${ROBLOX_AUTH_COOKIE_HEADERS.length}`
   const cachedPlatform = readCache(platformCache, cacheKey)
 
   if (cachedPlatform) {
@@ -1808,12 +1962,21 @@ async function fetchPlatformDiscoverySet() {
   }
 
   try {
-    const sortPayloads = await Promise.all(
-      PLATFORM_SORT_IDS.map(async (sortId) => ({
-        sortId,
-        payload: await fetchDiscoverSort(sortId),
-      })),
-    )
+    const [sortPayloads, homeRecommendationSet] = await Promise.all([
+      Promise.all(
+        PLATFORM_SORT_IDS.map(async (sortId) => ({
+          sortId,
+          payload: await fetchDiscoverSort(sortId),
+        })),
+      ),
+      fetchHomeRecommendationSet().catch((error) => {
+        console.warn(
+          '[roterminal-server] failed to fetch authenticated Roblox Home recommendations',
+          error,
+        )
+        return { games: [], discoveredSorts: [] }
+      }),
+    ])
 
     const discoveredByUniverseId = new Map()
 
@@ -1834,10 +1997,57 @@ async function fetchPlatformDiscoverySet() {
       }
     }
 
+    for (const game of homeRecommendationSet.games) {
+      if (!discoveredByUniverseId.has(game.universeId)) {
+        discoveredByUniverseId.set(game.universeId, game)
+      }
+    }
+
     const universeIds = [...discoveredByUniverseId.keys()]
     const { games, source } = await fetchUniverseGames(universeIds)
+    const gamesByUniverseId = new Map(games.map((game) => [game.universeId, game]))
+    const fallbackTimestamp = new Date().toISOString()
 
-    const enrichedGames = games.map((game) => {
+    discoveredByUniverseId.forEach((entry, universeId) => {
+      if (gamesByUniverseId.has(universeId)) {
+        return
+      }
+
+      const approval =
+        (entry.totalUpVotes ?? 0) + (entry.totalDownVotes ?? 0) > 0
+          ? ((entry.totalUpVotes ?? 0) / ((entry.totalUpVotes ?? 0) + (entry.totalDownVotes ?? 0))) * 100
+          : 0
+
+      gamesByUniverseId.set(universeId, {
+        rootPlaceId: entry.rootPlaceId,
+        universeId,
+        name: entry.name ?? `Universe ${universeId}`,
+        description: '',
+        creatorName: entry.creatorName ?? 'Unknown creator',
+        creatorId: entry.creatorId ?? 0,
+        creatorType: entry.creatorType ?? 'User',
+        creatorHasVerifiedBadge: false,
+        genre: entry.genre ?? 'Unclassified',
+        genrePrimary: entry.genre ?? 'Unclassified',
+        genreSecondary: null,
+        playing: entry.playerCount ?? 0,
+        visits: 0,
+        favoritedCount: 0,
+        upVotes: entry.totalUpVotes ?? 0,
+        downVotes: entry.totalDownVotes ?? 0,
+        approval,
+        price: null,
+        maxPlayers: null,
+        created: fallbackTimestamp,
+        updated: fallbackTimestamp,
+        createVipServersAllowed: false,
+        thumbnailUrl: undefined,
+        bannerUrl: undefined,
+        screenshotUrls: [],
+      })
+    })
+
+    const enrichedGames = [...gamesByUniverseId.values()].map((game) => {
       const discoverEntry = discoveredByUniverseId.get(game.universeId)
       const upVotes = discoverEntry?.totalUpVotes ?? 0
       const downVotes = discoverEntry?.totalDownVotes ?? 0
@@ -1856,10 +2066,13 @@ async function fetchPlatformDiscoverySet() {
     const platformPayload = {
       games: enrichedGames,
       discoveredUniverseIds: universeIds,
-      discoveredSorts: sortPayloads.map(({ sortId, payload }) => ({
-        sortId,
-        count: payload.games?.length ?? 0,
-      })),
+      discoveredSorts: [
+        ...sortPayloads.map(({ sortId, payload }) => ({
+          sortId,
+          count: payload.games?.length ?? 0,
+        })),
+        ...homeRecommendationSet.discoveredSorts,
+      ],
     }
 
     writeCache(platformCache, cacheKey, platformPayload, LIVE_DISCOVERY_CACHE_TTL_MS)

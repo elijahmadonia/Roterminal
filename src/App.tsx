@@ -93,6 +93,7 @@ export default function App() {
       navigateToGame(resolvedUniverseId)
     } catch (error) {
       console.error(error)
+      throw error
     }
   }
 

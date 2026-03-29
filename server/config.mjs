@@ -26,6 +26,30 @@ function readBooleanEnv(name, fallback) {
   return fallback
 }
 
+function readStringEnv(name, fallback = '') {
+  const raw = process.env[name]
+
+  if (raw == null) {
+    return fallback
+  }
+
+  const value = raw.trim()
+  return value.length > 0 ? value : fallback
+}
+
+function readListEnv(name) {
+  const raw = process.env[name]
+
+  if (raw == null) {
+    return []
+  }
+
+  return [...new Set(raw
+    .split(/\r?\n/)
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0))]
+}
+
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 
@@ -66,6 +90,11 @@ export const REQUEST_TIMEOUT_MS = readNumberEnv(
   'ROTERMINAL_REQUEST_TIMEOUT_MS',
   8_000,
 )
+export const ROBLOX_SECURITY_COOKIE = readStringEnv('ROBLOX_SECURITY_COOKIE', '')
+export const ROBLOX_SECURITY_COOKIES = [...new Set([
+  ...readListEnv('ROBLOX_SECURITY_COOKIES'),
+  ...(ROBLOX_SECURITY_COOKIE ? [ROBLOX_SECURITY_COOKIE] : []),
+])]
 export const SEARCH_CACHE_TTL_MS = readNumberEnv(
   'ROTERMINAL_SEARCH_CACHE_TTL_MS',
   60_000,
