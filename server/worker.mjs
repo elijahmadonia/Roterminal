@@ -284,7 +284,7 @@ async function fetchHomeRecommendationEntries() {
     return []
   }
 
-  const payloads = await Promise.all(
+  const payloads = await Promise.allSettled(
     ROBLOX_AUTH_COOKIE_HEADERS.map((cookieHeader) =>
       fetchJson(
         'https://apis.roblox.com/discovery-api/omni-recommendation',
@@ -303,9 +303,18 @@ async function fetchHomeRecommendationEntries() {
     ),
   )
 
+  const successfulPayloads = payloads
+    .filter((result) => result.status === 'fulfilled')
+    .map((result) => result.value)
+
+  if (successfulPayloads.length === 0) {
+    const firstError = payloads.find((result) => result.status === 'rejected')?.reason
+    throw firstError instanceof Error ? firstError : new Error('Home recommendation fetch failed')
+  }
+
   const entriesByUniverseId = new Map()
 
-  payloads.forEach((payload) => {
+  successfulPayloads.forEach((payload) => {
     ;(payload.sorts ?? []).forEach((sort) => {
       extractHomeRecommendationEntries(sort, entriesByUniverseId)
     })

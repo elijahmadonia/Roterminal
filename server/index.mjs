@@ -279,6 +279,13 @@ const GENRE_BENCHMARKS = {
 
 let lastIngestedAt = null
 let lastIngestError = null
+let lastHomeFetchAttemptedAt = null
+let lastHomeFetchSucceededAt = null
+let lastHomeFetchError = null
+let lastHomeFetchSortCount = 0
+let lastHomeFetchUniverseCount = 0
+let lastHomeFetchSeedSuccessCount = 0
+let lastHomeFetchSeedFailureCount = 0
 const startedAt = Date.now()
 const schedulerOwnerId = `api-server:${process.pid}:${randomUUID()}`
 let scheduledIngestInFlight = false
@@ -1887,16 +1894,24 @@ function extractHomeRecommendationEntries(node, entriesByUniverseId = new Map())
 
 async function fetchHomeRecommendationSet() {
   if (ROBLOX_AUTH_COOKIE_HEADERS.length === 0) {
+    lastHomeFetchAttemptedAt = null
+    lastHomeFetchSucceededAt = null
+    lastHomeFetchError = null
+    lastHomeFetchSortCount = 0
+    lastHomeFetchUniverseCount = 0
+    lastHomeFetchSeedSuccessCount = 0
+    lastHomeFetchSeedFailureCount = 0
     return {
       games: [],
       discoveredSorts: [],
     }
   }
 
+  lastHomeFetchAttemptedAt = new Date().toISOString()
   const discoveredByUniverseId = new Map()
   const discoveredSorts = []
 
-  const payloads = await Promise.all(
+  const payloads = await Promise.allSettled(
     ROBLOX_AUTH_COOKIE_HEADERS.map((cookieHeader, index) =>
       fetchJson(
         'https://apis.roblox.com/discovery-api/omni-recommendation',
@@ -1915,7 +1930,28 @@ async function fetchHomeRecommendationSet() {
     ),
   )
 
-  for (const { index, payload } of payloads) {
+  const successfulPayloads = payloads
+    .filter((result) => result.status === 'fulfilled')
+    .map((result) => result.value)
+  const failedPayloads = payloads.filter((result) => result.status === 'rejected')
+
+  lastHomeFetchSeedSuccessCount = successfulPayloads.length
+  lastHomeFetchSeedFailureCount = failedPayloads.length
+
+  if (successfulPayloads.length === 0) {
+    const firstError = failedPayloads[0]?.reason
+    lastHomeFetchError = firstError instanceof Error ? firstError.message : 'Unknown Home fetch failure'
+    lastHomeFetchSucceededAt = null
+    lastHomeFetchSortCount = 0
+    lastHomeFetchUniverseCount = 0
+    throw firstError instanceof Error ? firstError : new Error(lastHomeFetchError)
+  }
+
+  lastHomeFetchError = failedPayloads.length > 0
+    ? `${failedPayloads.length} of ${ROBLOX_AUTH_COOKIE_HEADERS.length} Home seeds failed`
+    : null
+
+  for (const { index, payload } of successfulPayloads) {
     for (const sort of payload.sorts ?? []) {
       const sortEntries = [...extractHomeRecommendationEntries(sort).values()]
       const baseSortId =
@@ -1943,6 +1979,10 @@ async function fetchHomeRecommendationSet() {
       })
     }
   }
+
+  lastHomeFetchSucceededAt = new Date().toISOString()
+  lastHomeFetchSortCount = discoveredSorts.length
+  lastHomeFetchUniverseCount = discoveredByUniverseId.size
 
   return {
     games: [...discoveredByUniverseId.values()],
@@ -3938,6 +3978,16 @@ function getOpsMetrics() {
       missing: missingIngest,
       stale: staleIngest,
       activeLeaseExpired,
+    },
+    homeRecommendations: {
+      seedCountConfigured: ROBLOX_AUTH_COOKIE_HEADERS.length,
+      lastAttemptedAt: lastHomeFetchAttemptedAt,
+      lastSucceededAt: lastHomeFetchSucceededAt,
+      lastError: lastHomeFetchError,
+      sortCount: lastHomeFetchSortCount,
+      universeCount: lastHomeFetchUniverseCount,
+      seedSuccessCount: lastHomeFetchSeedSuccessCount,
+      seedFailureCount: lastHomeFetchSeedFailureCount,
     },
     cache: {
       searchKeys: searchCache.size,
