@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: roterminal
+    env: node
+    plan: starter
+    buildCommand: npm install && npm run build
+    startCommand: npm run start:server
+    healthCheckPath: /ready
+    disk:
+      name: roterminal-data
+      mountPath: /opt/render/project/src/data
+      sizeGB: 1
+    envVars:
+      - key: NODE_VERSION
+        value: 24.1.0
+      - key: ROTERMINAL_SERVER_PORT
+        value: 10000
+      - key: ROTERMINAL_DB_PATH
+        value: /opt/render/project/src/data/roterminal.db
+      - key: ROTERMINAL_SERVER_ENABLE_SCHEDULED_INGEST
+        value: true
+      - key: ROTERMINAL_INGEST_INTERVAL_MINUTES
+        value: 5
+      - key: ROTERMINAL_INGEST_STALE_AFTER_MS
+        value: 1200000

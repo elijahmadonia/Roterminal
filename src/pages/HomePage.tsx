@@ -1,0 +1,675 @@
+import type { ReactNode } from 'react'
+import { useCallback, useMemo, useState } from 'react'
+import { fetchPlatformLivePoint } from '../api/roblox'
+import { CategoryPerformanceMap } from '../components/market-ui/CategoryPerformanceMap'
+import { GamesOverviewTable } from '../components/market-ui/GamesOverviewTable'
+import { LiveLineChart } from '../components/market-ui/LiveLineChart'
+import { LiveMetricHero } from '../components/market-ui/LiveMetricHero'
+import { SegmentedControl } from '../components/market-ui/SegmentedControl'
+import { TopFiveLiveSeriesChart } from '../components/market-ui/TopFiveLiveSeriesChart'
+import { UnderlineTabs } from '../components/market-ui/UnderlineTabs'
+import {
+  ApprovalNumber,
+  CompactNumber,
+  PercentNumber,
+  WholeNumber,
+} from '../components/ui/AnimatedNumber'
+import { useRollingLiveline } from '../hooks/useRollingLiveline'
+import { useLiveBoard } from '../hooks/useLiveBoard'
+import { useLivePlatform } from '../hooks/useLivePlatform'
+import { usePlatformLivePoint } from '../hooks/usePlatformLivePoint'
+import { TOKENS } from '../design/marketTokens'
+import type { ChartRange, LiveLeaderboardRow, TrendPoint } from '../types'
+import type { LivelinePoint } from 'liveline'
+
+type HomePageProps = {
+  onOpenGame: (game: { universeId?: number; name: string }) => void
+}
+
+const HOME_WINDOW_OPTIONS = [
+  { label: 'Live', secs: 60 },
+  { label: '1D', secs: 24 * 60 * 60 },
+  { label: '1W', secs: 7 * 24 * 60 * 60 },
+  { label: '1M', secs: 30 * 24 * 60 * 60 },
+] as const
+const HOME_TABLE_ROW_LIMIT = 10
+const HOME_RANGE_TO_BOARD_RANGE: Record<(typeof HOME_WINDOW_OPTIONS)[number]['label'], ChartRange> = {
+  Live: '30m',
+  '1D': '24h',
+  '1W': '7d',
+  '1M': '30d',
+}
+const TOP_THREE_SERIES_COLORS = [
+  TOKENS.colors.accent1,
+  'rgb(216, 151, 31)',
+  'rgb(28, 226, 183)',
+] as const
+
+function toLiveLineData(points: Array<{ timestamp?: string; value: number }>): LivelinePoint[] {
+  const fallbackStart = Math.floor(Date.now() / 1000) - points.length * 300
+
+  return points.map((point, index) => {
+    const parsedTimestamp = point.timestamp ? Date.parse(point.timestamp) : Number.NaN
+
+    return {
+      time: Number.isNaN(parsedTimestamp)
+        ? fallbackStart + index * 300
+        : Math.floor(parsedTimestamp / 1000),
+      value: point.value,
+    }
+  })
+}
+
+function toLiveLineSeed(
+  points: Array<{ timestamp?: string; value: number }>,
+  latestPoint?: { timestamp?: string; value: number } | null,
+): LivelinePoint[] {
+  const timelineData = toLiveLineData(points)
+
+  if (timelineData.length > 0) {
+    return timelineData
+  }
+
+  if (!latestPoint) {
+    return []
+  }
+
+  const parsedTimestamp = latestPoint.timestamp ? Date.parse(latestPoint.timestamp) : Number.NaN
+
+  return [
+    {
+      time: Number.isNaN(parsedTimestamp)
+        ? Math.floor(Date.now() / 1000)
+        : Math.floor(parsedTimestamp / 1000),
+      value: latestPoint.value,
+    },
+  ]
+}
+
+export default function HomePage({
+  onOpenGame,
+}: HomePageProps) {
+  const [heroRange, setHeroRange] = useState<'Live' | '1D' | '1W' | '1M'>('1D')
+  const [hiddenTopThreeIds, setHiddenTopThreeIds] = useState<number[]>([])
+  const [gamesView, setGamesView] = useState<
+    'Top Games' | 'Trending' | 'Gainers' | 'Losers' | 'Breakouts'
+  >('Top Games')
+  const activeHeroWindow =
+    HOME_WINDOW_OPTIONS.find((option) => option.label === heroRange) ?? HOME_WINDOW_OPTIONS[0]
+  const homeBoardRange = HOME_RANGE_TO_BOARD_RANGE[heroRange]
+  const platformHeroRange: ChartRange = heroRange === 'Live' ? '1h' : homeBoardRange
+  const platformHeroWindowSeconds = heroRange === 'Live' ? 60 * 60 : activeHeroWindow.secs
+  const topFiveWindow = activeHeroWindow
+  const {
+    data: livePlatform,
+    isLoading: isPlatformLoading,
+  } = useLivePlatform(platformHeroRange)
+  const {
+    data: livePlatformPoint,
+    isLoading: isPlatformPointLoading,
+  } = usePlatformLivePoint()
+  const {
+    data: liveBoard,
+    isLoading: isBoardLoading,
+  } = useLiveBoard(homeBoardRange)
+  const platformHistoricalLine = useMemo(
+    () => toLiveLineData(livePlatform?.timeline ?? []),
+    [livePlatform?.timeline],
+  )
+  const homeLineSeed = useMemo(
+    () => toLiveLineSeed(livePlatform?.timeline ?? [], livePlatform?.latest ?? livePlatformPoint),
+    [livePlatform?.latest, livePlatform?.timeline, livePlatformPoint],
+  )
+  const homeLiveLine = useRollingLiveline({
+    initialData: homeLineSeed,
+    windowSeconds: platformHeroWindowSeconds,
+    reseedKey: platformHeroRange,
+    enabled: heroRange === 'Live',
+    pollIntervalMs: 4_000,
+    heartbeatMs: 250,
+    fetchLatest: fetchPlatformLivePoint,
+  })
+  const platformHeroChartData = heroRange === 'Live'
+    ? homeLiveLine.data
+    : platformHistoricalLine
+  const platformHeroValue = heroRange === 'Live'
+    ? (homeLiveLine.latestValue ?? livePlatformPoint?.value ?? livePlatform?.latest.value ?? null)
+    : (livePlatform?.latest.value ?? platformHistoricalLine.at(-1)?.value ?? null)
+  const heroMetricValue = platformHeroValue != null
+    ? <WholeNumber value={platformHeroValue} flashOnChange />
+    : 'Unavailable'
+  const isHeroChartLoading = heroRange === 'Live'
+    ? isPlatformLoading && isPlatformPointLoading && platformHeroChartData.length === 0
+    : isPlatformLoading && platformHeroChartData.length === 0
+
+  const accentFromGame = (seed: string) => {
+    const palette = [
+      TOKENS.colors.base,
+      TOKENS.colors.accent1,
+      TOKENS.colors.success,
+      TOKENS.colors.warning,
+      '#43C7FF',
+      '#8EE3A2',
+      '#B793FF',
+      '#F59E7A',
+    ]
+
+    const hash = [...seed].reduce((total, char) => total + char.charCodeAt(0), 0)
+    return palette[hash % palette.length]
+  }
+
+  const topLeaderboard = useMemo(
+    () => (liveBoard?.leaderboard ?? []).slice(0, 50),
+    [liveBoard?.leaderboard],
+  )
+  const topFiveLeaderboard = useMemo(
+    () => (liveBoard?.leaderboard ?? []).slice(0, 50),
+    [liveBoard?.leaderboard],
+  )
+  const topFiveTimelineByUniverseId = useMemo(
+    () =>
+      Object.fromEntries(
+        (liveBoard?.topFiveSeries ?? []).map((series) => [series.universeId, series.timeline]),
+      ) as Record<number, TrendPoint[]>,
+    [liveBoard?.topFiveSeries],
+  )
+  const topThreeLeaderboard = useMemo(
+    () => topFiveLeaderboard.slice(0, 3),
+    [topFiveLeaderboard],
+  )
+  const topThreeTotalValue = useMemo(
+    () => topThreeLeaderboard.reduce((sum, game) => sum + game.playing, 0),
+    [topThreeLeaderboard],
+  )
+  const activeHiddenTopThreeIds = useMemo(
+    () =>
+      hiddenTopThreeIds.filter((id) =>
+        topThreeLeaderboard.some((game) => game.universeId === id),
+      ),
+    [hiddenTopThreeIds, topThreeLeaderboard],
+  )
+  const toggleTopThreeId = useCallback((universeId: number) => {
+    setHiddenTopThreeIds((current) => {
+      const isHidden = current.includes(universeId)
+
+      if (isHidden) {
+        return current.filter((id) => id !== universeId)
+      }
+
+      const visibleCount = topThreeLeaderboard.filter(
+        (game) => !current.includes(game.universeId),
+      ).length
+
+      if (visibleCount <= 1) {
+        return current
+      }
+
+      return [...current, universeId]
+    })
+  }, [topThreeLeaderboard])
+  const topThreeLegend = useMemo(
+    () => (
+      <div
+        style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: '6px',
+          flexWrap: 'wrap',
+          justifyContent: 'flex-end',
+        }}
+      >
+        {topThreeLeaderboard.map((game, index) => (
+          <button
+            key={game.universeId}
+            type="button"
+            onClick={() => toggleTopThreeId(game.universeId)}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '6px',
+              color: activeHiddenTopThreeIds.includes(game.universeId)
+                ? `${TOKENS.colors.neutral2}88`
+                : TOKENS.colors.neutral2,
+              padding: '7px 9px',
+              borderRadius: '10px',
+              border: 'none',
+              background: activeHiddenTopThreeIds.includes(game.universeId)
+                ? 'rgba(255,255,255,0.02)'
+                : 'rgba(255,255,255,0.04)',
+              cursor: 'pointer',
+              opacity: activeHiddenTopThreeIds.includes(game.universeId) ? 0.48 : 1,
+              transition: `opacity ${TOKENS.transitions.fast}, background ${TOKENS.transitions.fast}, color ${TOKENS.transitions.fast}`,
+            }}
+          >
+            <span
+              style={{
+                width: '8px',
+                height: '8px',
+                borderRadius: TOKENS.radii.pill,
+                background: TOP_THREE_SERIES_COLORS[index % TOP_THREE_SERIES_COLORS.length],
+                flexShrink: 0,
+                opacity: activeHiddenTopThreeIds.includes(game.universeId) ? 0.5 : 1,
+              }}
+            />
+          </button>
+        ))}
+      </div>
+    ),
+    [activeHiddenTopThreeIds, toggleTopThreeId, topThreeLeaderboard],
+  )
+
+  const mapLiveRow = useCallback(
+    (
+      game: LiveLeaderboardRow,
+      index: number,
+      config: {
+        primaryValue: ReactNode
+        secondaryValue?: ReactNode
+        deltaValue?: number
+      },
+    ) => ({
+      rank: index + 1,
+      universeId: game.universeId,
+      name: game.name,
+      studio: game.creatorName,
+      primaryValue: config.primaryValue,
+      primarySortValue: game.approval,
+      secondaryValue: config.secondaryValue,
+      secondarySortValue: game.playing,
+      deltaValue: config.deltaValue,
+      trend: game.sparkline,
+      chartTone: game.tone,
+      accentColor: accentFromGame(`${game.name}-${game.genre}`),
+      thumbnailUrl: game.thumbnailUrl,
+    }),
+    [],
+  )
+
+  const fillTableRows = useCallback(
+    (
+      sortedGames: LiveLeaderboardRow[],
+      predicate?: (game: LiveLeaderboardRow) => boolean,
+    ) => {
+      const prioritized = predicate
+        ? sortedGames.filter(predicate)
+        : sortedGames
+
+      if (prioritized.length >= HOME_TABLE_ROW_LIMIT) {
+        return prioritized.slice(0, HOME_TABLE_ROW_LIMIT)
+      }
+
+      const selectedIds = new Set(prioritized.map((game) => game.universeId))
+      const fallback = sortedGames.filter((game) => !selectedIds.has(game.universeId))
+
+      return [...prioritized, ...fallback].slice(0, HOME_TABLE_ROW_LIMIT)
+    },
+    [],
+  )
+
+  const topGamesRows = useMemo(
+    () =>
+      topLeaderboard.length > 0
+        ? fillTableRows(
+            topLeaderboard
+              .slice()
+              .sort((left, right) => right.playing - left.playing),
+          )
+            .map((game, index) =>
+              mapLiveRow(game, index, {
+                primaryValue: <ApprovalNumber value={game.approval} />,
+                secondaryValue: <CompactNumber value={game.playing} flashOnChange />,
+                deltaValue: game.delta24h,
+              }),
+            )
+        : [],
+    [fillTableRows, mapLiveRow, topLeaderboard],
+  )
+
+  const trendingRows = useMemo(
+    () =>
+      topLeaderboard.length > 0
+        ? fillTableRows(
+            topLeaderboard
+              .slice()
+              .sort((left, right) => right.delta1h - left.delta1h),
+            (game) => game.delta1h > 0,
+          )
+            .map((game, index) =>
+              mapLiveRow(game, index, {
+                primaryValue: <ApprovalNumber value={game.approval} />,
+                secondaryValue: <CompactNumber value={game.playing} flashOnChange />,
+                deltaValue: game.delta24h,
+              }),
+            )
+        : [],
+    [fillTableRows, mapLiveRow, topLeaderboard],
+  )
+
+  const topGainerRows = useMemo(
+    () =>
+      topLeaderboard.length > 0
+        ? fillTableRows(
+            topLeaderboard
+              .slice()
+              .sort((left, right) => right.delta24h - left.delta24h),
+            (game) => game.delta24h > 0,
+          )
+            .map((game, index) =>
+              mapLiveRow(game, index, {
+                primaryValue: <ApprovalNumber value={game.approval} />,
+                secondaryValue: <CompactNumber value={game.playing} flashOnChange />,
+                deltaValue: game.delta24h,
+              }),
+            )
+        : [],
+    [fillTableRows, mapLiveRow, topLeaderboard],
+  )
+
+  const topLoserRows = useMemo(
+    () =>
+      topLeaderboard.length > 0
+        ? fillTableRows(
+            topLeaderboard
+              .slice()
+              .sort((left, right) => left.delta24h - right.delta24h),
+            (game) => game.delta24h < 0,
+          )
+            .map((game, index) =>
+              mapLiveRow(game, index, {
+                primaryValue: <ApprovalNumber value={game.approval} />,
+                secondaryValue: <CompactNumber value={game.playing} flashOnChange />,
+                deltaValue: game.delta24h,
+              }),
+            )
+        : [],
+    [fillTableRows, mapLiveRow, topLeaderboard],
+  )
+
+  const breakoutRows = useMemo(
+    () =>
+      topLeaderboard.length > 0
+        ? fillTableRows(
+            topLeaderboard
+              .slice()
+              .sort((left, right) => right.delta24h - left.delta24h),
+            (game) =>
+              game.playing >= 10_000 &&
+              game.playing <= 250_000 &&
+              game.delta24h > 0,
+          )
+            .map((game, index) =>
+              mapLiveRow(game, index, {
+                primaryValue: <ApprovalNumber value={game.approval} />,
+                secondaryValue: <CompactNumber value={game.playing} flashOnChange />,
+                deltaValue: game.delta24h,
+              }),
+            )
+        : [],
+    [fillTableRows, mapLiveRow, topLeaderboard],
+  )
+
+  const tableConfig = useMemo(() => {
+    if (gamesView === 'Trending') {
+      return {
+        rows: trendingRows,
+        props: {
+          primaryLabel: 'Approval',
+          secondaryLabel: 'CCU',
+          deltaLabel: '24H',
+          showTrend: true,
+        },
+      }
+    }
+
+    if (gamesView === 'Gainers') {
+      return {
+        rows: topGainerRows,
+        props: {
+          primaryLabel: 'Approval',
+          secondaryLabel: 'CCU',
+          deltaLabel: '24H',
+          showTrend: true,
+        },
+      }
+    }
+
+    if (gamesView === 'Losers') {
+      return {
+        rows: topLoserRows,
+        props: {
+          primaryLabel: 'Approval',
+          secondaryLabel: 'CCU',
+          deltaLabel: '24H',
+          showTrend: true,
+        },
+      }
+    }
+
+    if (gamesView === 'Breakouts') {
+      return {
+        rows: breakoutRows,
+        props: {
+          primaryLabel: 'Approval',
+          secondaryLabel: 'CCU',
+          deltaLabel: '24H',
+          showTrend: true,
+        },
+      }
+    }
+
+    return {
+      rows: topGamesRows,
+        props: {
+          primaryLabel: 'Approval',
+          secondaryLabel: 'CCU',
+          deltaLabel: '24H',
+          showTrend: true,
+          showRank: true,
+        },
+    }
+  }, [breakoutRows, gamesView, topGainerRows, topGamesRows, topLoserRows, trendingRows])
+
+  const categoryMapSections = useMemo(() => {
+    if (topLeaderboard.length === 0) return []
+
+    const groups = new Map<string, LiveLeaderboardRow[]>()
+
+    topLeaderboard.slice(0, 48).forEach((game) => {
+      const key = game.genre || 'Other'
+      const next = groups.get(key)
+
+      if (next) {
+        next.push(game)
+        return
+      }
+
+      groups.set(key, [game])
+    })
+
+    return Array.from(groups.entries())
+      .map(([title, games]) => ({
+        title,
+        totalPlaying: games.reduce((sum, game) => sum + game.playing, 0),
+        games: games.slice().sort((left, right) => right.playing - left.playing),
+      }))
+      .sort((left, right) => right.totalPlaying - left.totalPlaying)
+      .slice(0, 10)
+      .map((section, sectionIndex) => {
+        const maxPlaying = section.games[0]?.playing ?? 1
+
+        return {
+          id: section.title,
+          title: section.title,
+          span:
+            (sectionIndex < 2 ? 6 : sectionIndex < 5 ? 4 : 3) as 3 | 4 | 6,
+          items: section.games.slice(0, sectionIndex < 2 ? 10 : 8).map((game, itemIndex) => {
+            const weight = game.playing / maxPlaying
+
+            let span: 'hero' | 'feature' | 'standard' | 'compact' | 'micro' =
+              'micro'
+
+            if (itemIndex === 0) {
+              span = sectionIndex < 2 ? 'hero' : 'feature'
+            } else if (weight >= 0.58) {
+              span = 'feature'
+            } else if (weight >= 0.32) {
+              span = 'standard'
+            } else if (weight >= 0.16) {
+              span = 'compact'
+            }
+
+            const weeklyTone: 'positive' | 'negative' | 'neutral' =
+              game.deltaWeek > 0
+                ? 'positive'
+                : game.deltaWeek < 0
+                  ? 'negative'
+                  : 'neutral'
+
+            return {
+              id: game.universeId,
+              title: game.name,
+              value: <PercentNumber value={game.deltaWeek} signed />,
+              subtitle: <><CompactNumber value={game.playing} flashOnChange /> CCU</>,
+              change: game.deltaWeek,
+              weight: game.playing,
+              imageUrl: game.thumbnailUrl,
+              tone: weeklyTone,
+              span,
+            }
+          }),
+        }
+      })
+  }, [topLeaderboard])
+
+  return (
+    <div
+      style={{
+        minHeight: '100vh',
+        background: TOKENS.colors.surface1,
+        color: TOKENS.colors.neutral1,
+        fontFamily: TOKENS.typography.fontFamily,
+      }}
+      >
+      <main
+        style={{
+          maxWidth: '1100px',
+          margin: '0 auto',
+          padding: '32px 28px 72px',
+          display: 'grid',
+          gap: TOKENS.spacing.xxl,
+        }}
+      >
+        <section
+          style={{
+            display: 'grid',
+            gap: TOKENS.spacing.xxl,
+          }}
+        >
+          <div
+            style={{
+              display: 'grid',
+              gap: TOKENS.spacing.lg,
+            }}
+          >
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'flex-end',
+              }}
+            >
+              <SegmentedControl
+                options={['Live', '1D', '1W', '1M'] as const}
+                value={heroRange}
+                onChange={setHeroRange}
+              />
+            </div>
+
+            <div className="home-overview-hero-grid">
+              <LiveMetricHero
+                label="Total Players"
+                labelStyle={TOKENS.typography.body2}
+                value={heroMetricValue}
+                points={[]}
+                tone={livePlatform?.tone ?? 'neutral'}
+                chartColor={TOKENS.colors.base}
+                chartHeight={280}
+                loading={isHeroChartLoading}
+                chart={
+                  <LiveLineChart
+                    data={platformHeroChartData}
+                    window={platformHeroWindowSeconds}
+                    tone={livePlatform?.tone ?? 'neutral'}
+                    color={TOKENS.colors.base}
+                    height={280}
+                    loading={isHeroChartLoading}
+                  />
+                }
+              />
+
+              <LiveMetricHero
+                label="Top 3 Players"
+                labelStyle={TOKENS.typography.body2}
+                value={<WholeNumber value={topThreeTotalValue} flashOnChange />}
+                labelTrailing={topThreeLegend}
+                points={[]}
+                tone="neutral"
+                chartHeight={280}
+                chart={
+                  <TopFiveLiveSeriesChart
+                    games={topThreeLeaderboard}
+                    timelineByUniverseId={topFiveTimelineByUniverseId}
+                    windowSeconds={topFiveWindow.secs}
+                    mode={heroRange === 'Live' ? 'live' : 'history'}
+                    height={280}
+                    loading={isBoardLoading && topThreeLeaderboard.length === 0}
+                    hiddenUniverseIds={activeHiddenTopThreeIds}
+                  />
+                }
+              />
+            </div>
+          </div>
+
+          <div className="home-overview-grid">
+            <div
+              style={{
+                display: 'grid',
+                gap: TOKENS.spacing.md,
+                gridColumn: '1 / -1',
+              }}
+            >
+              <UnderlineTabs
+                options={
+                  ['Top Games', 'Trending', 'Gainers', 'Losers', 'Breakouts'] as const
+                }
+                value={gamesView}
+                onChange={setGamesView}
+              />
+
+              <GamesOverviewTable
+                variant="compact"
+                rows={tableConfig.rows}
+                loading={isBoardLoading && topLeaderboard.length === 0}
+                skeletonRowCount={9}
+                onRowClick={(row) => onOpenGame({ universeId: row.universeId, name: row.name })}
+                {...tableConfig.props}
+              />
+            </div>
+
+            <div style={{ gridColumn: '1 / -1' }}>
+              <CategoryPerformanceMap
+                sections={categoryMapSections}
+                loading={isBoardLoading && topLeaderboard.length === 0}
+                onItemClick={(item) =>
+                  onOpenGame({
+                    universeId: Number(item.id),
+                    name: item.title,
+                  })
+                }
+              />
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+  )
+}
