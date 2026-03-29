@@ -172,7 +172,7 @@ function drawBottomBadge(ctx: CanvasRenderingContext2D, height: number) {
   ctx.fillStyle = 'rgba(255, 255, 255, 0.5)'
   ctx.font = `600 36px ${TOKENS.typography.fontFamily}`
   ctx.textAlign = 'left'
-  ctx.fillText('roterminal.com', 92, height - 64)
+  ctx.fillText('roterminal.co', 92, height - 64)
 }
 
 function drawMetaRow(

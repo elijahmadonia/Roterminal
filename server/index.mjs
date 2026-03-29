@@ -4345,11 +4345,35 @@ const server = createServer(async (request, response) => {
         return sendJson(response, 404, { error: 'Game thumbnail not found.' })
       }
 
-      response.writeHead(302, {
-        Location: imageUrl,
-        'Cache-Control': 'public, max-age=300',
-      })
-      response.end()
+      const controller = new AbortController()
+      const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
+
+      try {
+        const imageResponse = await fetch(imageUrl, {
+          signal: controller.signal,
+          headers: {
+            Accept: 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+          },
+        })
+
+        if (!imageResponse.ok) {
+          return sendJson(response, imageResponse.status, { error: 'Game thumbnail fetch failed.' })
+        }
+
+        const contentType = imageResponse.headers.get('content-type') || 'image/png'
+        const arrayBuffer = await imageResponse.arrayBuffer()
+
+        response.writeHead(
+          200,
+          buildSecurityHeaders({
+            'Content-Type': contentType,
+            'Cache-Control': 'public, max-age=300',
+          }),
+        )
+        response.end(Buffer.from(arrayBuffer))
+      } finally {
+        clearTimeout(timeoutId)
+      }
       return
     }
 
