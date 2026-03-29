@@ -126,6 +126,7 @@ export default function App() {
       activeRoute={route.kind}
       onOpenHome={navigateToHome}
       onOpenComponents={navigateToComponents}
+      onOpenGame={openHomeGame}
     >
       {pageContent}
     </AppShell>
