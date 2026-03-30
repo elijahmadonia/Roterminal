@@ -4202,6 +4202,40 @@ function getOpsMetrics() {
   }
 }
 
+function getReadyStatus() {
+  const lastIngestedAtMs =
+    typeof lastIngestedAt === 'string' ? Date.parse(lastIngestedAt) : Number.NaN
+  const staleIngest =
+    Number.isFinite(lastIngestedAtMs) && Date.now() - lastIngestedAtMs > INGEST_STALE_AFTER_MS
+  const missingIngest = !Number.isFinite(lastIngestedAtMs)
+  const ok = lastIngestError == null
+
+  return {
+    ok,
+    uptimeSeconds: Math.round((Date.now() - startedAt) / 1000),
+    lastIngestedAt,
+    lastIngestError,
+    scheduledIngestEnabled: SERVER_ENABLE_SCHEDULED_INGEST,
+    ingest: {
+      missing: missingIngest,
+      stale: staleIngest,
+    },
+    homeRecommendations: {
+      seedCountConfigured: ROBLOX_AUTH_COOKIE_HEADERS.length,
+      lastAttemptedAt: lastHomeFetchAttemptedAt,
+      lastSucceededAt: lastHomeFetchSucceededAt,
+      lastError: lastHomeFetchError,
+    },
+    cache: {
+      searchKeys: searchCache.size,
+      gameKeys: gamesCache.size,
+      platformKeys: platformCache.size,
+      boardKeys: boardCache.size,
+      supplementalKeys: gameSupplementalCache.size,
+    },
+  }
+}
+
 function buildSingleGameTimeline(game, range = '24h') {
   const cutoffMs = Date.now() - CHART_RANGE_MS[range]
   const points = [
@@ -4427,20 +4461,11 @@ const server = createServer(async (request, response) => {
 
   try {
     if (request.method === 'GET' && url.pathname === '/health') {
-      return sendJson(response, 200, {
-        ok: true,
-        trackedUniverseIds: getTrackedUniverseIds(),
-        lastIngestedAt,
-        lastIngestError,
-        scheduledIngestEnabled: SERVER_ENABLE_SCHEDULED_INGEST,
-        ingestIntervalMs: INGEST_INTERVAL_MS,
-        databasePath: DB_PATH,
-      })
+      return sendJson(response, 200, getReadyStatus())
     }
 
     if (request.method === 'GET' && url.pathname === '/ready') {
-      const ops = getOpsMetrics()
-      return sendJson(response, ops.ok ? 200 : 503, ops)
+      return sendJson(response, 200, getReadyStatus())
     }
 
     if (request.method === 'GET' && url.pathname === '/api/ops/metrics') {
