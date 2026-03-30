@@ -90,6 +90,7 @@ export const REQUEST_TIMEOUT_MS = readNumberEnv(
   'ROTERMINAL_REQUEST_TIMEOUT_MS',
   8_000,
 )
+export const IMPORT_TOKEN = readStringEnv('ROTERMINAL_IMPORT_TOKEN', '')
 export const ROBLOX_SECURITY_COOKIE = readStringEnv('ROBLOX_SECURITY_COOKIE', '')
 export const ROBLOX_SECURITY_COOKIES = [...new Set([
   ...readListEnv('ROBLOX_SECURITY_COOKIES'),

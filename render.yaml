@@ -23,6 +23,8 @@ services:
         value: 5
       - key: ROTERMINAL_INGEST_STALE_AFTER_MS
         value: 1200000
+      - key: ROTERMINAL_IMPORT_TOKEN
+        sync: false
       - key: ROBLOX_SECURITY_COOKIE
         sync: false
       - key: ROBLOX_SECURITY_COOKIES

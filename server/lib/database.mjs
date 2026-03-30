@@ -6,6 +6,7 @@ import {
   DB_PATH,
   INGEST_RUN_STALE_AFTER_MS,
   SNAPSHOT_RETENTION_MS,
+  TRACKED_UNIVERSE_CAP,
 } from '../config.mjs'
 
 const MIGRATIONS = [
@@ -1427,6 +1428,160 @@ export async function createDatabase() {
     return limitedIds
   }
 
+  function importHistoryBundle(
+    {
+      catalogEntries = [],
+      observations = [],
+      trackedUniverseIds = [],
+      replaceTracked = false,
+      trackedLimit = TRACKED_UNIVERSE_CAP,
+      defaultSource = 'history_import',
+    } = {},
+  ) {
+    const catalogByUniverseId = new Map()
+    let catalogUpsertedCount = 0
+    let observationsReceivedCount = 0
+    let observationsInsertedCount = 0
+    const latestObservationByUniverseId = new Map()
+
+    runInTransaction(() => {
+      for (const entry of catalogEntries) {
+        const universeId = Number(entry?.universeId ?? entry?.universe_id)
+
+        if (!Number.isFinite(universeId) || universeId <= 0) {
+          continue
+        }
+
+        const catalogEntry = {
+          universeId,
+          name: String(entry?.name ?? `Universe ${universeId}`),
+          creatorName: String(entry?.creatorName ?? entry?.creator_name ?? 'Unknown creator'),
+          creatorType: String(entry?.creatorType ?? entry?.creator_type ?? 'Unknown'),
+          genre: String(entry?.genre ?? 'Unclassified'),
+          firstSeenAt: String(entry?.firstSeenAt ?? entry?.first_seen_at ?? new Date().toISOString()),
+          lastSeenAt: String(entry?.lastSeenAt ?? entry?.last_seen_at ?? new Date().toISOString()),
+          lastGameUpdatedAt: String(
+            entry?.lastGameUpdatedAt ?? entry?.last_game_updated_at ?? entry?.lastSeenAt ?? entry?.last_seen_at ?? new Date().toISOString(),
+          ),
+        }
+
+        upsertUniverseCatalogStmt.run(
+          catalogEntry.universeId,
+          catalogEntry.name,
+          catalogEntry.creatorName,
+          catalogEntry.creatorType,
+          catalogEntry.genre,
+          catalogEntry.firstSeenAt,
+          catalogEntry.lastSeenAt,
+          catalogEntry.lastGameUpdatedAt,
+        )
+
+        catalogByUniverseId.set(universeId, catalogEntry)
+        catalogUpsertedCount += 1
+      }
+
+      for (const entry of observations) {
+        const universeId = Number(entry?.universeId ?? entry?.universe_id)
+        const observedAt = String(entry?.observedAt ?? entry?.observed_at ?? '')
+        const favoritedCountRaw = entry?.favoritedCount ?? entry?.favorited_count
+
+        if (!Number.isFinite(universeId) || universeId <= 0 || observedAt.length === 0) {
+          continue
+        }
+
+        observationsReceivedCount += 1
+
+        const catalogEntry = catalogByUniverseId.get(universeId) ?? {
+          universeId,
+          name: String(entry?.name ?? `Universe ${universeId}`),
+          creatorName: String(entry?.creatorName ?? entry?.creator_name ?? 'Unknown creator'),
+          creatorType: String(entry?.creatorType ?? entry?.creator_type ?? 'Unknown'),
+          genre: String(entry?.genre ?? 'Unclassified'),
+          firstSeenAt: observedAt,
+          lastSeenAt: observedAt,
+          lastGameUpdatedAt: String(entry?.updated ?? entry?.gameUpdatedAt ?? entry?.game_updated_at ?? observedAt),
+        }
+
+        if (!catalogByUniverseId.has(universeId)) {
+          upsertUniverseCatalogStmt.run(
+            catalogEntry.universeId,
+            catalogEntry.name,
+            catalogEntry.creatorName,
+            catalogEntry.creatorType,
+            catalogEntry.genre,
+            catalogEntry.firstSeenAt,
+            catalogEntry.lastSeenAt,
+            catalogEntry.lastGameUpdatedAt,
+          )
+          catalogByUniverseId.set(universeId, catalogEntry)
+        }
+
+        const latestKnown = latestObservationByUniverseId.get(universeId)
+        if (
+          !latestKnown ||
+          new Date(observedAt).getTime() >= new Date(latestKnown.observedAt).getTime()
+        ) {
+          latestObservationByUniverseId.set(universeId, {
+            observedAt,
+            playing: Number(entry?.playing) || 0,
+            visits: entry?.visits == null ? 0 : Number(entry.visits) || 0,
+            favoritedCount: favoritedCountRaw == null ? 0 : Number(favoritedCountRaw) || 0,
+            approval: entry?.approval == null ? 0 : Number(entry.approval) || 0,
+            gameUpdatedAt: String(
+              entry?.updated ?? entry?.gameUpdatedAt ?? entry?.game_updated_at ?? observedAt,
+            ),
+            source: String(entry?.source ?? defaultSource),
+          })
+        }
+
+        const insertResult = insertObservationStmt.run(
+          universeId,
+          observedAt,
+          Number(entry?.playing) || 0,
+          entry?.visits == null ? 0 : Number(entry.visits) || 0,
+          favoritedCountRaw == null ? 0 : Number(favoritedCountRaw) || 0,
+          entry?.approval == null ? 0 : Number(entry.approval) || 0,
+          String(entry?.updated ?? entry?.gameUpdatedAt ?? entry?.game_updated_at ?? observedAt),
+          String(entry?.source ?? defaultSource),
+        )
+
+        if ((insertResult.changes ?? 0) > 0) {
+          observationsInsertedCount += 1
+        }
+      }
+
+      for (const [universeId, latest] of latestObservationByUniverseId.entries()) {
+        upsertUniverseCurrentMetricsStmt.run(
+          universeId,
+          latest.observedAt,
+          latest.playing,
+          latest.visits,
+          latest.favoritedCount,
+          latest.approval,
+          latest.gameUpdatedAt,
+          latest.source,
+        )
+      }
+
+      const sanitizedTrackedIds = sanitizeUniverseIds(trackedUniverseIds)
+      if (sanitizedTrackedIds.length > 0) {
+        if (replaceTracked) {
+          replaceTrackedUniverseIds(sanitizedTrackedIds.slice(0, trackedLimit))
+        } else {
+          appendTrackedUniverseIds(sanitizedTrackedIds, trackedLimit)
+        }
+      }
+    })
+
+    return {
+      catalogUpsertedCount,
+      observationsReceivedCount,
+      observationsInsertedCount,
+      currentMetricsUpsertedCount: latestObservationByUniverseId.size,
+      trackedUniverseCount: getTrackedUniverseIds().length,
+    }
+  }
+
   function getHistoryMap(universeIds, cutoffIso) {
     const uniqueIds = sanitizeUniverseIds(universeIds)
 
@@ -2092,6 +2247,7 @@ export async function createDatabase() {
     getLatestSnapshotGames,
     getPlatformCurrentMetric,
     getTrackedUniverseIds,
+    importHistoryBundle,
     importLegacySnapshot,
     recordGamePageSnapshot,
     recordPlatformCurrentMetric,

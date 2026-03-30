@@ -2,6 +2,7 @@ import { createServer } from 'node:http'
 import { access, readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { gunzipSync } from 'node:zlib'
 import {
   BOARD_CACHE_TTL_MS,
   DB_PATH,
@@ -12,6 +13,7 @@ import {
   INGEST_LEASE_TTL_MS,
   INGEST_INTERVAL_MS,
   INGEST_STALE_AFTER_MS,
+  IMPORT_TOKEN,
   MAX_FETCH_RETRIES,
   ONE_DAY_MS,
   ONE_HOUR_MS,
@@ -312,6 +314,7 @@ const {
   getLatestSnapshotGames,
   getPlatformCurrentMetric,
   getTrackedUniverseIds,
+  importHistoryBundle,
   recordGamePageSnapshot,
   recordPlatformCurrentMetric,
   recordSnapshots,
@@ -511,6 +514,48 @@ function sendJson(response, statusCode, payload) {
     }),
   )
   response.end(JSON.stringify(payload))
+}
+
+async function readRequestBody(request, maxBytes = 64 * 1024 * 1024) {
+  const chunks = []
+  let totalBytes = 0
+
+  for await (const chunk of request) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+    totalBytes += buffer.length
+
+    if (totalBytes > maxBytes) {
+      const error = new Error('Request body too large.')
+      error.statusCode = 413
+      throw error
+    }
+
+    chunks.push(buffer)
+  }
+
+  return Buffer.concat(chunks)
+}
+
+function isAuthorizedImportRequest(request) {
+  if (!IMPORT_TOKEN) {
+    return false
+  }
+
+  const authorization = request.headers.authorization ?? ''
+  const expectedValue = `Bearer ${IMPORT_TOKEN}`
+  return authorization === expectedValue
+}
+
+function resetInMemoryCaches() {
+  searchCache.clear()
+  gamesCache.clear()
+  platformCache.clear()
+  platformStatsCache.clear()
+  boardCache.clear()
+  gamePageCache.clear()
+  gameSupplementalCache.clear()
+  gameIconRedirectCache.clear()
+  lastBoardUniverseIds = []
 }
 
 function sleep(ms) {
@@ -4267,6 +4312,35 @@ const server = createServer(async (request, response) => {
 
     if (request.method === 'GET' && url.pathname === '/api/ops/metrics') {
       return sendJson(response, 200, getOpsMetrics())
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/admin/import-history') {
+      if (!isAuthorizedImportRequest(request)) {
+        return sendJson(response, 401, { error: 'Unauthorized.' })
+      }
+
+      const rawBody = await readRequestBody(request)
+      const decodedBody =
+        request.headers['content-encoding'] === 'gzip'
+          ? gunzipSync(rawBody)
+          : rawBody
+      const payload = JSON.parse(decodedBody.toString('utf8'))
+      const result = importHistoryBundle({
+        catalogEntries: Array.isArray(payload?.catalogEntries) ? payload.catalogEntries : [],
+        observations: Array.isArray(payload?.observations) ? payload.observations : [],
+        trackedUniverseIds: Array.isArray(payload?.trackedUniverseIds) ? payload.trackedUniverseIds : [],
+        replaceTracked: Boolean(payload?.replaceTracked),
+        trackedLimit: Number.isFinite(Number(payload?.trackedLimit))
+          ? Number(payload.trackedLimit)
+          : TRACKED_UNIVERSE_CAP,
+        defaultSource:
+          typeof payload?.defaultSource === 'string' && payload.defaultSource.length > 0
+            ? payload.defaultSource
+            : 'history_import',
+      })
+
+      resetInMemoryCaches()
+      return sendJson(response, 200, result)
     }
 
     if (request.method === 'GET' && url.pathname === '/api/search') {
