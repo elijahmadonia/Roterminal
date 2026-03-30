@@ -2707,6 +2707,52 @@ function buildStoredPlatformStats(range = '24h') {
   }
 }
 
+function buildPlatformStatsFromBoardPayload(boardPayload, range = '24h') {
+  const timeline = limitTrendPoints(
+    (Array.isArray(boardPayload?.timeline) ? boardPayload.timeline : [])
+      .filter((entry) => Number.isFinite(entry?.value))
+      .map((entry) => ({
+        label: entry.label ?? formatTrendLabel(entry.timestamp ?? new Date().toISOString()),
+        timestamp: entry.timestamp ?? new Date().toISOString(),
+        value: entry.value,
+      })),
+    getMaxTrendPoints(range),
+  )
+  const latestPoint = timeline.at(-1)
+
+  if (!latestPoint) {
+    return null
+  }
+
+  const peakPoint = timeline.reduce(
+    (current, entry) => (!current || entry.value > current.value ? entry : current),
+    null,
+  )
+  const tone = buildPlatformTone(latestPoint.value, timeline)
+
+  return {
+    status: {
+      label: 'Platform CCU derived from indexed board',
+      detail: `${formatWholeNumber(latestPoint.value)} players across indexed live experiences right now.`,
+      tone,
+    },
+    source: 'cache',
+    latest: {
+      value: latestPoint.value,
+      timestamp: latestPoint.timestamp,
+      source: 'cache',
+    },
+    peak: peakPoint
+      ? {
+          value: peakPoint.value,
+          timestamp: peakPoint.timestamp,
+        }
+      : null,
+    timeline,
+    tone,
+  }
+}
+
 async function fetchFullPlatformStats(range = '24h') {
   const cachedStats = readCache(platformStatsCache, range)
 
@@ -2767,6 +2813,39 @@ async function fetchFullPlatformStats(range = '24h') {
       if (storedStats) {
         writeCache(platformStatsCache, range, storedStats, getPlatformStatsCacheTtlMs(range))
         return storedStats
+      }
+
+      const cachedBoard =
+        readCache(boardCache, range) ?? readStaleCacheValue(boardCache, range)
+      const cachedBoardDerivedStats = buildPlatformStatsFromBoardPayload(cachedBoard, range)
+
+      if (cachedBoardDerivedStats) {
+        writeCache(
+          platformStatsCache,
+          range,
+          cachedBoardDerivedStats,
+          getPlatformStatsCacheTtlMs(range),
+        )
+        return cachedBoardDerivedStats
+      }
+
+      try {
+        const boardPayload = await fetchPlatformBoardPayload(range, {
+          persistSnapshots: false,
+        })
+        const boardDerivedStats = buildPlatformStatsFromBoardPayload(boardPayload, range)
+
+        if (boardDerivedStats) {
+          writeCache(
+            platformStatsCache,
+            range,
+            boardDerivedStats,
+            getPlatformStatsCacheTtlMs(range),
+          )
+          return boardDerivedStats
+        }
+      } catch {
+        // Ignore board fallback failures and continue to stale platform cache below.
       }
 
       if (staleStats) {
