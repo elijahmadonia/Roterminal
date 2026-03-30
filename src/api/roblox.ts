@@ -35,9 +35,30 @@ interface RobloxSearchResponse {
 
 async function fetchJson<T>(url: string): Promise<T> {
   const response = await fetch(url)
+  const requestId = response.headers.get('x-request-id')
 
   if (!response.ok) {
-    throw new Error(`Request failed: ${response.status}`)
+    let message = `Request failed: ${response.status}`
+    const contentType = response.headers.get('content-type') ?? ''
+
+    try {
+      if (contentType.includes('application/json')) {
+        const payload = await response.json() as { error?: string; requestId?: string }
+        message = payload.error ?? message
+
+        if (payload.requestId ?? requestId) {
+          message = `${message} [request ${payload.requestId ?? requestId}]`
+        }
+      } else if (requestId) {
+        message = `${message} [request ${requestId}]`
+      }
+    } catch {
+      if (requestId) {
+        message = `${message} [request ${requestId}]`
+      }
+    }
+
+    throw new Error(message)
   }
 
   return (await response.json()) as T
