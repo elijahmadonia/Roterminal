@@ -7,6 +7,7 @@ import { promisify } from 'node:util'
 import { gunzipSync } from 'node:zlib'
 import {
   BOARD_CACHE_TTL_MS,
+  DATA_BACKEND,
   DB_PATH,
   DEFAULT_TRACKED_IDS,
   DIST_DIR,
@@ -31,7 +32,7 @@ import {
   UNIVERSE_FETCH_BATCH_CONCURRENCY,
 } from './config.mjs'
 import { migrateLegacyJsonIfNeeded } from './lib/bootstrap.mjs'
-import { createDatabase } from './lib/database.mjs'
+import { createStore } from './lib/store.mjs'
 
 const SIX_HOURS_MS = 6 * ONE_HOUR_MS
 const THIRTY_MINUTES_MS = 30 * 60 * 1000
@@ -113,6 +114,7 @@ const GAME_PAGE_SERVER_SAMPLE_LIMIT = 100
 const GAME_PAGE_CREATOR_PORTFOLIO_LIMIT = 8
 const GAME_PAGE_COMPARABLE_LIMIT = 8
 const GAME_PAGE_PEER_POOL_LIMIT = 120
+const STORE_SOURCE = DATA_BACKEND === 'memory' ? 'memory' : 'database'
 const SCREENER_STOPWORDS = new Set([
   'a',
   'about',
@@ -303,7 +305,7 @@ function gameIconPath(universeId) {
   return `/api/game-icon/${universeId}`
 }
 
-const database = await createDatabase()
+const database = await createStore()
 const {
   appendTrackedUniverseIds,
   countCatalogEntries,
@@ -1364,7 +1366,7 @@ async function fetchScreenerPayload(query) {
   const universeIds = [...candidateIds].slice(0, SCREENER_SEARCH_LIMIT + trackedIds.length)
   const { games, source } = await fetchUniverseGames(universeIds)
 
-  if (!SERVER_ENABLE_SCHEDULED_INGEST && source !== 'database') {
+  if (!SERVER_ENABLE_SCHEDULED_INGEST && source !== STORE_SOURCE) {
     recordSnapshots(games)
   }
 
@@ -2302,7 +2304,7 @@ async function fetchUniverseGames(universeIds, options = {}) {
       UNIVERSE_FETCH_BATCH_CONCURRENCY,
       (batch) => fetchUniverseGames(batch, { bypassCache, retries }),
     )
-    const sourcePriority = { live: 0, cache: 1, database: 2 }
+    const sourcePriority = { live: 0, cache: 1, [STORE_SOURCE]: 2 }
     const mergedSource = responses.reduce(
       (current, entry) =>
         sourcePriority[entry.source] > sourcePriority[current] ? entry.source : current,
@@ -2419,7 +2421,7 @@ async function fetchUniverseGames(universeIds, options = {}) {
     if (snapshotGames.length > 0) {
       return {
         games: snapshotGames,
-        source: 'database',
+        source: STORE_SOURCE,
       }
     }
 
@@ -2457,7 +2459,7 @@ async function fetchGameLivePointPayload(universeId) {
       universeId,
       value: snapshotGame.playing,
       timestamp: new Date().toISOString(),
-      source: 'database',
+      source: STORE_SOURCE,
     }
   }
 }
@@ -4007,7 +4009,7 @@ async function fetchPlatformBoardPayload(
   const [platformSet, trackedLiveFallback] = await Promise.all([
     fetchPlatformDiscoverySet(),
     trackedSnapshotGames.length > 0
-      ? Promise.resolve({ games: trackedSnapshotGames, source: 'database' })
+      ? Promise.resolve({ games: trackedSnapshotGames, source: STORE_SOURCE })
       : fetchUniverseGames(trackedIds),
   ])
   lastBoardUniverseIds = platformSet.discoveredUniverseIds
@@ -4059,7 +4061,7 @@ function fetchBoardLivePointPayload() {
   return {
     value: latestGames.reduce((sum, game) => sum + game.playing, 0),
     timestamp: new Date().toISOString(),
-    source: 'database',
+    source: STORE_SOURCE,
   }
 }
 
@@ -4301,7 +4303,8 @@ function getOpsMetrics() {
       boardKeys: boardCache.size,
       supplementalKeys: gameSupplementalCache.size,
     },
-    databasePath: DB_PATH,
+    dataBackend: DATA_BACKEND,
+    databasePath: DATA_BACKEND === 'sqlite' ? DB_PATH : null,
   }
 }
 
@@ -4594,7 +4597,7 @@ function buildFastGamePageSnapshotPayload(universeId, range) {
     peerGames,
     trackedUniverseIds,
     buildUnavailableGameSupplementalData(snapshotGame),
-    'database',
+    STORE_SOURCE,
     range,
   )
 }

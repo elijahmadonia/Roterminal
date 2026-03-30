@@ -1,9 +1,16 @@
 import { readFile } from 'node:fs/promises'
 
-import { DEFAULT_TRACKED_IDS, LEGACY_STATE_PATH } from '../config.mjs'
+import { DATA_BACKEND, DEFAULT_TRACKED_IDS, LEGACY_STATE_PATH } from '../config.mjs'
 
 export async function migrateLegacyJsonIfNeeded(database) {
   const { countTrackedUniverseIds, importLegacySnapshot, replaceTrackedUniverseIds } = database
+
+  if (DATA_BACKEND !== 'sqlite') {
+    if (countTrackedUniverseIds() === 0) {
+      replaceTrackedUniverseIds(DEFAULT_TRACKED_IDS)
+    }
+    return
+  }
 
   if (countTrackedUniverseIds() > 0) {
     return

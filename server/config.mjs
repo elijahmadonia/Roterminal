@@ -91,6 +91,7 @@ export const REQUEST_TIMEOUT_MS = readNumberEnv(
   8_000,
 )
 export const IMPORT_TOKEN = readStringEnv('ROTERMINAL_IMPORT_TOKEN', '')
+export const DATA_BACKEND = readStringEnv('ROTERMINAL_DATA_BACKEND', 'sqlite')
 export const ROBLOX_SECURITY_COOKIE = readStringEnv('ROBLOX_SECURITY_COOKIE', '')
 export const ROBLOX_SECURITY_COOKIES = [...new Set([
   ...readListEnv('ROBLOX_SECURITY_COOKIES'),
