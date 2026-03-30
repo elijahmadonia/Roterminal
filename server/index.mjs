@@ -46,6 +46,9 @@ const CHART_RANGE_MS = {
   '30d': THIRTY_DAYS_MS,
 }
 const GAME_ICON_CACHE_TTL_MS = 5 * 60 * 1000
+const GAME_PAGE_CORE_CACHE_TTL_MS = 60 * 1000
+const GAME_PAGE_FULL_CACHE_TTL_MS = 5 * 60 * 1000
+const CACHE_SWEEP_INTERVAL_MS = 60 * 1000
 
 const LIVE_DISCOVERY_CACHE_TTL_MS = Math.min(PLATFORM_CACHE_TTL_MS, 5_000)
 const execFileAsync = promisify(execFile)
@@ -85,13 +88,11 @@ function getBoardPayloadCacheTtlMs(range) {
 }
 
 function getGamePagePayloadCacheTtlMs(range, detailLevel = 'full') {
-  const baseTtlMs = getBoardPayloadCacheTtlMs(range)
-
   if (detailLevel === 'core') {
-    return Math.min(baseTtlMs, 5_000)
+    return GAME_PAGE_CORE_CACHE_TTL_MS
   }
 
-  return Math.min(baseTtlMs, 15_000)
+  return GAME_PAGE_FULL_CACHE_TTL_MS
 }
 const OFFICIAL_PLATFORM_SCALE = {
   value: '45M',
@@ -107,7 +108,7 @@ const PLATFORM_SORT_IDS = [
 const PLATFORM_GAME_BATCH_SIZE = 50
 const SCREENER_RESULT_LIMIT = 15
 const SCREENER_SEARCH_LIMIT = 24
-const GAME_PAGE_SERVER_SAMPLE_MAX_PAGES = 10
+const GAME_PAGE_SERVER_SAMPLE_MAX_PAGES = 4
 const GAME_PAGE_SERVER_SAMPLE_LIMIT = 100
 const GAME_PAGE_CREATOR_PORTFOLIO_LIMIT = 8
 const GAME_PAGE_COMPARABLE_LIMIT = 8
@@ -161,6 +162,8 @@ const boardCache = new Map()
 const gamePageCache = new Map()
 const gameSupplementalCache = new Map()
 const gameIconRedirectCache = new Map()
+const gamePageRequestCache = new Map()
+const gameSupplementalRequestCache = new Map()
 let lastBoardUniverseIds = []
 const ROBLOX_AUTH_COOKIE_HEADERS = [...new Set(
   ROBLOX_SECURITY_COOKIES.map((cookieValue) =>
@@ -854,11 +857,35 @@ function readCacheEntry(cache, key) {
   return cache.get(key) ?? null
 }
 
+function readStaleCacheValue(cache, key) {
+  return readCacheEntry(cache, key)?.value ?? null
+}
+
 function writeCache(cache, key, value, ttlMs) {
   cache.set(key, {
     value,
     expiresAt: Date.now() + ttlMs,
   })
+}
+
+function sweepExpiredCache(cache, now = Date.now()) {
+  for (const [key, entry] of cache.entries()) {
+    if (entry.expiresAt <= now) {
+      cache.delete(key)
+    }
+  }
+}
+
+function sweepAllCaches() {
+  const now = Date.now()
+  sweepExpiredCache(searchCache, now)
+  sweepExpiredCache(gamesCache, now)
+  sweepExpiredCache(platformCache, now)
+  sweepExpiredCache(platformStatsCache, now)
+  sweepExpiredCache(boardCache, now)
+  sweepExpiredCache(gamePageCache, now)
+  sweepExpiredCache(gameSupplementalCache, now)
+  sweepExpiredCache(gameIconRedirectCache, now)
 }
 
 function chunkItems(items, size) {
@@ -2256,7 +2283,10 @@ async function fetchPlatformDiscoverySet() {
 }
 
 async function fetchUniverseGames(universeIds, options = {}) {
-  const { bypassCache = false } = options
+  const {
+    bypassCache = false,
+    retries = MAX_FETCH_RETRIES,
+  } = options
 
   if (universeIds.length === 0) {
     return {
@@ -2270,7 +2300,7 @@ async function fetchUniverseGames(universeIds, options = {}) {
     const responses = await mapWithConcurrency(
       batches,
       UNIVERSE_FETCH_BATCH_CONCURRENCY,
-      (batch) => fetchUniverseGames(batch),
+      (batch) => fetchUniverseGames(batch, { bypassCache, retries }),
     )
     const sourcePriority = { live: 0, cache: 1, database: 2 }
     const mergedSource = responses.reduce(
@@ -2297,8 +2327,8 @@ async function fetchUniverseGames(universeIds, options = {}) {
 
   try {
     const [gamesResponse, votesResponse, thumbnailsResponse, bannersResponse] = await Promise.all([
-      fetchJson(`https://games.roblox.com/v1/games?universeIds=${idList}`),
-      fetchJson(`https://games.roblox.com/v1/games/votes?universeIds=${idList}`),
+      fetchJson(`https://games.roblox.com/v1/games?universeIds=${idList}`, retries),
+      fetchJson(`https://games.roblox.com/v1/games/votes?universeIds=${idList}`, retries),
       fetchJson(
         `https://thumbnails.roblox.com/v1/games/icons?universeIds=${idList}&size=150x150&format=Png&isCircular=false`,
         0,
@@ -3601,7 +3631,9 @@ async function fetchCreatorPortfolio(game) {
       .map((entry) => entry.id)
 
     const livePortfolio =
-      selectedUniverseIds.length > 0 ? await fetchUniverseGames(selectedUniverseIds) : { games: [] }
+      selectedUniverseIds.length > 0
+        ? await fetchUniverseGames(selectedUniverseIds, { retries: 0 })
+        : { games: [] }
     const liveByUniverseId = new Map(
       livePortfolio.games.map((entry) => [entry.universeId, entry]),
     )
@@ -3885,45 +3917,63 @@ async function fetchGameSupplementalData(game, { allowNetwork = true } = {}) {
     return buildUnavailableGameSupplementalData(game)
   }
 
-  const [
-    pageMeta,
-    ageRating,
-    creatorProfile,
-    creatorPortfolio,
-    servers,
-    gamePasses,
-    developerProducts,
-  ] =
-    await Promise.all([
-      fetchRobloxGamePageMetadata(game.rootPlaceId),
-      fetchAgeRating(game.universeId),
-      fetchCreatorProfile(game),
-      fetchCreatorPortfolio(game),
-      fetchServerSample(game),
-      fetchGamePassInventory(game.universeId),
-      fetchDeveloperProductInventory(game.universeId),
-    ])
+  const pendingRequest = gameSupplementalRequestCache.get(cacheKey)
 
-  const supplemental = {
-    pageMeta,
-    ageRating,
-    creatorProfile,
-    creatorPortfolio,
-    servers,
-    store: {
-      gamePasses,
-      developerProducts,
-    },
+  if (pendingRequest) {
+    return pendingRequest
   }
 
-  writeCache(
-    gameSupplementalCache,
-    cacheKey,
-    supplemental,
-    GAME_SUPPLEMENTAL_CACHE_TTL_MS,
-  )
+  const request = (async () => {
+    const [
+      pageMeta,
+      ageRating,
+      creatorProfile,
+      creatorPortfolio,
+      servers,
+      gamePasses,
+      developerProducts,
+    ] =
+      await Promise.all([
+        fetchRobloxGamePageMetadata(game.rootPlaceId),
+        fetchAgeRating(game.universeId),
+        fetchCreatorProfile(game),
+        fetchCreatorPortfolio(game),
+        fetchServerSample(game),
+        fetchGamePassInventory(game.universeId),
+        fetchDeveloperProductInventory(game.universeId),
+      ])
 
-  return supplemental
+    const supplemental = {
+      pageMeta,
+      ageRating,
+      creatorProfile,
+      creatorPortfolio,
+      servers,
+      store: {
+        gamePasses,
+        developerProducts,
+      },
+    }
+
+    writeCache(
+      gameSupplementalCache,
+      cacheKey,
+      supplemental,
+      GAME_SUPPLEMENTAL_CACHE_TTL_MS,
+    )
+
+    return supplemental
+  })()
+
+  gameSupplementalRequestCache.set(cacheKey, request)
+
+  try {
+    return await request
+  } finally {
+    if (gameSupplementalRequestCache.get(cacheKey) === request) {
+      gameSupplementalRequestCache.delete(cacheKey)
+    }
+  }
 }
 
 async function hydrateTrackedUniverses(universeIds, range = '24h') {
@@ -4018,59 +4068,107 @@ async function fetchGamePagePayload(universeId, range = '24h', detailLevel = 'fu
     return cachedPayload
   }
 
-  const { games, source } = await fetchUniverseGames([universeId])
+  const pendingRequest = gamePageRequestCache.get(cacheKey)
 
-  if (games.length === 0) {
-    const error = new Error('Game not found.')
-    error.statusCode = 404
-    throw error
+  if (pendingRequest) {
+    return pendingRequest
   }
 
-  if (source === 'live' && SERVER_ENABLE_SCHEDULED_INGEST) {
-    recordSnapshots(games)
+  const request = (async () => {
+    const stalePayload = readStaleCacheValue(gamePageCache, cacheKey)
+    const staleCorePayload =
+      detailLevel === 'full'
+        ? readStaleCacheValue(gamePageCache, `${universeId}:${range}:core`)
+        : null
+
+    if (detailLevel === 'core') {
+      const snapshotPayload = buildFastGamePageSnapshotPayload(universeId, range)
+
+      if (snapshotPayload) {
+        writeCache(
+          gamePageCache,
+          cacheKey,
+          snapshotPayload,
+          getGamePagePayloadCacheTtlMs(range, detailLevel),
+        )
+        return snapshotPayload
+      }
+    }
+
+    try {
+      const { games, source } = await fetchUniverseGames([universeId], { retries: 0 })
+
+      if (games.length === 0) {
+        const error = new Error('Game not found.')
+        error.statusCode = 404
+        throw error
+      }
+
+      if (source === 'live' && SERVER_ENABLE_SCHEDULED_INGEST) {
+        recordSnapshots(games)
+      }
+
+      appendTrackedUniverseIds([universeId], TRACKED_UNIVERSE_CAP)
+
+      const trackedUniverseIds = getTrackedUniverseIds()
+      const historyMap = getHistoryMap([universeId], getHistoryCutoffIso())
+      const peerGames = getLatestSnapshotGames(trackedUniverseIds).slice(0, GAME_PAGE_PEER_POOL_LIMIT)
+      const supplemental = await fetchGameSupplementalData(games[0], {
+        allowNetwork: detailLevel === 'full',
+      })
+      const payload = buildGameDetailPayload(
+        games[0],
+        historyMap,
+        peerGames,
+        trackedUniverseIds,
+        supplemental,
+        source,
+        range,
+      )
+
+      if (detailLevel === 'full') {
+        recordGamePageSnapshot(payload, {
+          source: `game_page_${source}`,
+        })
+      }
+
+      writeCache(
+        gamePageCache,
+        cacheKey,
+        payload,
+        getGamePagePayloadCacheTtlMs(range, detailLevel),
+      )
+
+      if (detailLevel === 'full') {
+        writeCache(
+          gamePageCache,
+          `${universeId}:${range}:core`,
+          payload,
+          getGamePagePayloadCacheTtlMs(range, 'core'),
+        )
+      }
+
+      return payload
+    } catch (error) {
+      const fallbackPayload = stalePayload ?? staleCorePayload
+
+      if (fallbackPayload) {
+        return markGamePagePayloadAsCached(fallbackPayload)
+      }
+
+      throw error
+    }
+  })()
+
+  gamePageRequestCache.set(cacheKey, request)
+
+  try {
+    return await request
+  } finally {
+    if (gamePageRequestCache.get(cacheKey) === request) {
+      gamePageRequestCache.delete(cacheKey)
+    }
   }
-
-  appendTrackedUniverseIds([universeId], TRACKED_UNIVERSE_CAP)
-
-  const trackedUniverseIds = getTrackedUniverseIds()
-  const historyMap = getHistoryMap([universeId], getHistoryCutoffIso())
-  const peerGames = getLatestSnapshotGames(trackedUniverseIds).slice(0, GAME_PAGE_PEER_POOL_LIMIT)
-  const supplemental = await fetchGameSupplementalData(games[0], {
-    allowNetwork: detailLevel === 'full',
-  })
-  const payload = buildGameDetailPayload(
-    games[0],
-    historyMap,
-    peerGames,
-    trackedUniverseIds,
-    supplemental,
-    source,
-    range,
-  )
-
-  if (detailLevel === 'full') {
-    recordGamePageSnapshot(payload, {
-      source: `game_page_${source}`,
-    })
-  }
-
-  writeCache(
-    gamePageCache,
-    cacheKey,
-    payload,
-    getGamePagePayloadCacheTtlMs(range, detailLevel),
-  )
-
-  if (detailLevel === 'full') {
-    writeCache(
-      gamePageCache,
-      `${universeId}:${range}:core`,
-      payload,
-      getGamePagePayloadCacheTtlMs(range, 'full'),
-    )
-  }
-
-  return payload
 }
 
 async function pollTrackedUniverses() {
@@ -4453,6 +4551,49 @@ function buildGameDetailPayload(
   }
 }
 
+function markGamePagePayloadAsCached(payload) {
+  return {
+    ...payload,
+    status: payload?.game?.name
+      ? {
+          ...payload.status,
+          label: `${payload.game.name} page using cache`,
+          tone: 'neutral',
+        }
+      : payload.status,
+    ops: {
+      ...(payload.ops ?? {}),
+      source: 'cache',
+      ingestIntervalMinutes: Math.round(INGEST_INTERVAL_MS / 60_000),
+      lastIngestedAt,
+    },
+  }
+}
+
+function buildFastGamePageSnapshotPayload(universeId, range) {
+  const snapshotGame = getLatestSnapshotGames([universeId])[0]
+
+  if (!snapshotGame) {
+    return null
+  }
+
+  appendTrackedUniverseIds([universeId], TRACKED_UNIVERSE_CAP)
+
+  const trackedUniverseIds = getTrackedUniverseIds()
+  const historyMap = getHistoryMap([universeId], getHistoryCutoffIso())
+  const peerGames = getLatestSnapshotGames(trackedUniverseIds).slice(0, GAME_PAGE_PEER_POOL_LIMIT)
+
+  return buildGameDetailPayload(
+    snapshotGame,
+    historyMap,
+    peerGames,
+    trackedUniverseIds,
+    buildUnavailableGameSupplementalData(snapshotGame),
+    'database',
+    range,
+  )
+}
+
 await migrateLegacyJsonIfNeeded(database)
 
 const server = createServer(async (request, response) => {
@@ -4685,6 +4826,11 @@ const server = createServer(async (request, response) => {
 
 server.listen(PORT, () => {
   console.log(`[roterminal-server] listening on http://localhost:${PORT}`)
+
+  const cacheSweepInterval = setInterval(() => {
+    sweepAllCaches()
+  }, CACHE_SWEEP_INTERVAL_MS)
+  cacheSweepInterval.unref?.()
 
   if (SERVER_ENABLE_SCHEDULED_INGEST) {
     // Start ingest after the API is already serving health checks.

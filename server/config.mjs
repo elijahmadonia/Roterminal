@@ -102,7 +102,7 @@ export const SEARCH_CACHE_TTL_MS = readNumberEnv(
 )
 export const GAMES_CACHE_TTL_MS = readNumberEnv(
   'ROTERMINAL_GAMES_CACHE_TTL_MS',
-  5_000,
+  15_000,
 )
 export const PLATFORM_CACHE_TTL_MS = readNumberEnv(
   'ROTERMINAL_PLATFORM_CACHE_TTL_MS',
@@ -118,7 +118,7 @@ export const BOARD_CACHE_TTL_MS = readNumberEnv(
 )
 export const GAME_SUPPLEMENTAL_CACHE_TTL_MS = readNumberEnv(
   'ROTERMINAL_GAME_SUPPLEMENTAL_CACHE_TTL_MS',
-  60_000,
+  5 * 60_000,
 )
 export const TRACKED_UNIVERSE_CAP = readNumberEnv(
   'ROTERMINAL_TRACKED_UNIVERSE_CAP',
