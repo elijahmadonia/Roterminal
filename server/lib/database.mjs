@@ -1397,14 +1397,18 @@ export async function createDatabase() {
     return getTrackedStmt.all().map((row) => row.universe_id)
   }
 
-  function replaceTrackedUniverseIds(universeIds) {
+  function replaceTrackedUniverseIdsInPlace(universeIds) {
     const uniqueIds = sanitizeUniverseIds(universeIds)
 
+    deleteTrackedStmt.run()
+    uniqueIds.forEach((universeId, index) => {
+      insertTrackedStmt.run(universeId, index)
+    })
+  }
+
+  function replaceTrackedUniverseIds(universeIds) {
     runInTransaction(() => {
-      deleteTrackedStmt.run()
-      uniqueIds.forEach((universeId, index) => {
-        insertTrackedStmt.run(universeId, index)
-      })
+      replaceTrackedUniverseIdsInPlace(universeIds)
     })
   }
 
@@ -1424,7 +1428,7 @@ export async function createDatabase() {
       ? dedupedIds.slice(-Math.max(Math.floor(maxCount), 1))
       : dedupedIds
 
-    replaceTrackedUniverseIds(limitedIds)
+    replaceTrackedUniverseIdsInPlace(limitedIds)
     return limitedIds
   }
 
