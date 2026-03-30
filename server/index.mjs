@@ -4420,13 +4420,6 @@ function buildGameDetailPayload(
 
 await migrateLegacyJsonIfNeeded(database)
 
-if (SERVER_ENABLE_SCHEDULED_INGEST) {
-  await runScheduledIngest()
-  setInterval(() => {
-    void runScheduledIngest()
-  }, INGEST_INTERVAL_MS)
-}
-
 const server = createServer(async (request, response) => {
   const url = new URL(request.url ?? '/', `http://${request.headers.host ?? 'localhost'}`)
   const started = Date.now()
@@ -4666,4 +4659,12 @@ const server = createServer(async (request, response) => {
 
 server.listen(PORT, () => {
   console.log(`[roterminal-server] listening on http://localhost:${PORT}`)
+
+  if (SERVER_ENABLE_SCHEDULED_INGEST) {
+    // Start ingest after the API is already serving health checks.
+    void runScheduledIngest()
+    setInterval(() => {
+      void runScheduledIngest()
+    }, INGEST_INTERVAL_MS)
+  }
 })
