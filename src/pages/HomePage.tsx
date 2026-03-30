@@ -33,12 +33,6 @@ const HOME_WINDOW_OPTIONS = [
   { label: '1M', secs: 30 * 24 * 60 * 60 },
 ] as const
 const HOME_TABLE_ROW_LIMIT = 25
-const HOME_RANGE_TO_BOARD_RANGE: Record<(typeof HOME_WINDOW_OPTIONS)[number]['label'], ChartRange> = {
-  Live: '30m',
-  '1D': '24h',
-  '1W': '7d',
-  '1M': '30d',
-}
 const TOP_THREE_SERIES_COLORS = [
   TOKENS.colors.accent1,
   'rgb(216, 151, 31)',
@@ -86,6 +80,35 @@ function toLiveLineSeed(
   ]
 }
 
+function getCoverageSeconds(points: Array<{ timestamp?: string }>) {
+  const timestamps = points
+    .map((point) => (point.timestamp ? Date.parse(point.timestamp) : Number.NaN))
+    .filter((value) => Number.isFinite(value))
+    .sort((left, right) => left - right)
+
+  if (timestamps.length <= 1) {
+    return 0
+  }
+
+  return Math.max(Math.floor((timestamps.at(-1)! - timestamps[0]!) / 1000), 0)
+}
+
+function formatCoverageNote(coverageSeconds: number, targetSeconds: number, label: string) {
+  if (coverageSeconds <= 0 || coverageSeconds >= targetSeconds * 0.9) {
+    return undefined
+  }
+
+  if (coverageSeconds < 60 * 60) {
+    return `Tracking ${Math.max(1, Math.round(coverageSeconds / 60))}m of data so far for ${label}.`
+  }
+
+  if (coverageSeconds < 24 * 60 * 60) {
+    return `Tracking ${(coverageSeconds / (60 * 60)).toFixed(1)}h of data so far for ${label}.`
+  }
+
+  return `Tracking ${(coverageSeconds / (24 * 60 * 60)).toFixed(1)}d of data so far for ${label}.`
+}
+
 export default function HomePage({
   onOpenGame,
 }: HomePageProps) {
@@ -96,8 +119,7 @@ export default function HomePage({
   >('Top Games')
   const activeHeroWindow =
     HOME_WINDOW_OPTIONS.find((option) => option.label === heroRange) ?? HOME_WINDOW_OPTIONS[0]
-  const homeBoardRange = HOME_RANGE_TO_BOARD_RANGE[heroRange]
-  const platformHeroRange: ChartRange = heroRange === 'Live' ? '1h' : homeBoardRange
+  const platformHeroRange: ChartRange = heroRange === 'Live' ? '1h' : '24h'
   const platformHeroWindowSeconds = heroRange === 'Live' ? 60 * 60 : activeHeroWindow.secs
   const topFiveWindow = activeHeroWindow
   const {
@@ -107,15 +129,35 @@ export default function HomePage({
   const {
     data: livePlatformPoint,
     isLoading: isPlatformPointLoading,
-  } = usePlatformLivePoint()
+  } = usePlatformLivePoint(heroRange === 'Live')
   const {
     data: liveBoard,
     isLoading: isBoardLoading,
-  } = useLiveBoard(homeBoardRange)
+  } = useLiveBoard('24h')
   const platformHistoricalLine = useMemo(
     () => toLiveLineData(livePlatform?.timeline ?? []),
     [livePlatform?.timeline],
   )
+  const platformHistoryCoverageSeconds = useMemo(
+    () => getCoverageSeconds(livePlatform?.timeline ?? []),
+    [livePlatform?.timeline],
+  )
+  const boardHistoryCoverageSeconds = useMemo(
+    () => getCoverageSeconds(liveBoard?.timeline ?? []),
+    [liveBoard?.timeline],
+  )
+  const historicalPlatformWindowSeconds =
+    platformHistoryCoverageSeconds > 0
+      ? Math.min(activeHeroWindow.secs, platformHistoryCoverageSeconds + 300)
+      : activeHeroWindow.secs
+  const historicalBoardWindowSeconds =
+    boardHistoryCoverageSeconds > 0
+      ? Math.min(topFiveWindow.secs, boardHistoryCoverageSeconds + 300)
+      : topFiveWindow.secs
+  const platformHistoryNote =
+    heroRange === 'Live'
+      ? undefined
+      : formatCoverageNote(platformHistoryCoverageSeconds, activeHeroWindow.secs, heroRange)
   const homeLineSeed = useMemo(
     () => toLiveLineSeed(livePlatform?.timeline ?? [], livePlatform?.latest ?? livePlatformPoint),
     [livePlatform?.latest, livePlatform?.timeline, livePlatformPoint],
@@ -132,6 +174,9 @@ export default function HomePage({
   const platformHeroChartData = heroRange === 'Live'
     ? homeLiveLine.data
     : platformHistoricalLine
+  const platformChartWindowSeconds = heroRange === 'Live'
+    ? platformHeroWindowSeconds
+    : historicalPlatformWindowSeconds
   const platformHeroValue = heroRange === 'Live'
     ? (homeLiveLine.latestValue ?? livePlatformPoint?.value ?? livePlatform?.latest.value ?? null)
     : (livePlatform?.latest.value ?? platformHistoricalLine.at(-1)?.value ?? null)
@@ -632,6 +677,7 @@ export default function HomePage({
                 label="Total Players"
                 labelStyle={TOKENS.typography.body2}
                 value={heroMetricValue}
+                subtitle={platformHistoryNote}
                 points={[]}
                 tone={livePlatform?.tone ?? 'neutral'}
                 chartColor={TOKENS.colors.base}
@@ -640,7 +686,7 @@ export default function HomePage({
                 chart={
                   <LiveLineChart
                     data={platformHeroChartData}
-                    window={platformHeroWindowSeconds}
+                    window={platformChartWindowSeconds}
                     tone={livePlatform?.tone ?? 'neutral'}
                     color={TOKENS.colors.base}
                     height={280}
@@ -661,7 +707,11 @@ export default function HomePage({
                   <TopFiveLiveSeriesChart
                     games={topThreeLeaderboard}
                     timelineByUniverseId={topFiveTimelineByUniverseId}
-                    windowSeconds={topFiveWindow.secs}
+                    windowSeconds={
+                      heroRange === 'Live'
+                        ? topFiveWindow.secs
+                        : historicalBoardWindowSeconds
+                    }
                     mode={heroRange === 'Live' ? 'live' : 'history'}
                     height={280}
                     loading={isBoardLoading && topThreeLeaderboard.length === 0}

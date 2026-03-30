@@ -10,16 +10,9 @@ function getPlatformRefreshIntervalMs(range: ChartRange): number {
   switch (range) {
     case '30m':
     case '1h':
-    case '24h':
-      return 5_000
-    case '6h':
-      return 10_000
-    case '7d':
-      return 20_000
-    case '30d':
       return 30_000
     default:
-      return 15_000
+      return 60_000
   }
 }
 

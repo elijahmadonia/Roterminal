@@ -44,7 +44,10 @@ type UsePlatformLivePointState = {
   isLoading: boolean
 }
 
-export function usePlatformLivePoint(pollIntervalMs = 15_000): UsePlatformLivePointState {
+export function usePlatformLivePoint(
+  enabled = true,
+  pollIntervalMs = 15_000,
+): UsePlatformLivePointState {
   const [data, setData] = useState<LiveValuePoint | null>(
     () => livePlatformPointCache ?? readStoredPoint(),
   )
@@ -64,6 +67,10 @@ export function usePlatformLivePoint(pollIntervalMs = 15_000): UsePlatformLivePo
   }, [])
 
   useEffect(() => {
+    if (!enabled) {
+      return
+    }
+
     const cachedPoint = livePlatformPointCache ?? readStoredPoint()
 
     if (cachedPoint) {
@@ -78,7 +85,7 @@ export function usePlatformLivePoint(pollIntervalMs = 15_000): UsePlatformLivePo
     }, pollIntervalMs)
 
     return () => window.clearInterval(intervalId)
-  }, [pollIntervalMs, refresh])
+  }, [enabled, pollIntervalMs, refresh])
 
   return {
     data,

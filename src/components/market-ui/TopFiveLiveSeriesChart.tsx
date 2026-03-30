@@ -116,6 +116,30 @@ function trimPoints(points: LivelinePoint[], windowSeconds: number, nowSeconds: 
   return points.length > 0 ? [points.at(-1)!] : []
 }
 
+function ensureRenderableSeries(
+  points: LivelinePoint[],
+  windowSeconds: number,
+  nowSeconds: number,
+) {
+  if (points.length === 0 || points.length > 1) {
+    return points
+  }
+
+  const onlyPoint = points[0]
+  const fallbackGap = Math.min(Math.max(windowSeconds / 6, 1), 10)
+  const anchorTime = Math.min(onlyPoint.time - 1, nowSeconds - 1)
+  const clampedAnchorTime = Math.max(
+    nowSeconds - windowSeconds,
+    anchorTime,
+    onlyPoint.time - fallbackGap,
+  )
+
+  return dedupePoints([
+    { time: clampedAnchorTime, value: onlyPoint.value },
+    onlyPoint,
+  ])
+}
+
 function smoothHistoricalPoints(points: LivelinePoint[], windowSeconds: number) {
   const targetPoints =
     windowSeconds >= THIRTY_DAYS_SECONDS
@@ -227,20 +251,20 @@ function buildSeriesPoints({
     const seededTimeline = seedPointsFromTimeline(timeline)
 
     if (mode === 'history') {
-      return smoothHistoricalPoints(
+      return ensureRenderableSeries(smoothHistoricalPoints(
         trimPoints(seededTimeline, windowSeconds, nowSeconds),
         windowSeconds,
-      )
+      ), windowSeconds, nowSeconds)
     }
 
-    return trimPoints(
+    return ensureRenderableSeries(trimPoints(
       dedupePoints([
         ...seededTimeline,
         { time: nowSeconds, value: timeline.at(-1)?.value ?? game.playing },
       ]),
       windowSeconds,
       nowSeconds,
-    )
+    ), windowSeconds, nowSeconds)
   }
 
   return seedSeriesMap([game], windowSeconds)[String(game.universeId)] ?? []
@@ -475,7 +499,7 @@ export function TopFiveLiveSeriesChart({
     void refresh()
     const intervalId = window.setInterval(() => {
       void refresh()
-    }, 2_000)
+    }, 5_000)
 
     return () => {
       cancelled = true

@@ -23,6 +23,11 @@ export function useGameDetail(
   const [error, setError] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const requestIdRef = useRef(0)
+  const latestDataRef = useRef<GameDetailResponse | null>(null)
+
+  useEffect(() => {
+    latestDataRef.current = data
+  }, [data])
 
   const refresh = useCallback(async () => {
     if (universeId == null) {
@@ -73,6 +78,10 @@ export function useGameDetail(
     const cacheKey = getGameDetailCacheKey(universeId, range)
     const cached = gameDetailCache.get(cacheKey) ?? null
     const requestId = ++requestIdRef.current
+    const previousUniverseData =
+      latestDataRef.current?.game.universeId === universeId
+        ? latestDataRef.current
+        : null
 
     setError(null)
 
@@ -80,8 +89,10 @@ export function useGameDetail(
       setData(cached)
       setIsLoading(false)
     } else {
-      setData(null)
-      setIsLoading(true)
+      if (!previousUniverseData) {
+        setData(null)
+      }
+      setIsLoading(previousUniverseData == null)
     }
 
     let cancelled = false

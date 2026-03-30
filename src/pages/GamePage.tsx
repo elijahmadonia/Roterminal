@@ -92,6 +92,14 @@ function toLiveLineData(points: TrendPoint[]) {
   })
 }
 
+function getCoverageSeconds(points: Array<{ time: number }>) {
+  if (points.length <= 1) {
+    return 0
+  }
+
+  return Math.max((points.at(-1)?.time ?? 0) - (points[0]?.time ?? 0), 0)
+}
+
 function formatDurationCompact(totalSeconds: number) {
   const roundedMinutes = Math.max(Math.round(totalSeconds / 60), 0)
 
@@ -1103,27 +1111,32 @@ export default function GamePage({
   }, [gameDetail?.game.universeId])
 
   const seedLineData = toLiveLineData(gameDetail?.timeline ?? [])
+  const isLiveRange = chartRange === '30m' || chartRange === '1h'
   const { data: liveBoard } = useLiveBoard('24h', sharePreviewEnabled)
   const liveLine = useRollingLiveline({
     initialData: seedLineData,
     windowSeconds: CHART_RANGE_SECONDS[chartRange],
     reseedKey: `${gameDetail?.game.universeId ?? 'none'}:${chartRange}`,
-    enabled: (gameDetail?.game.universeId ?? 0) > 0,
-    pollIntervalMs: 2_000,
+    enabled: isLiveRange && (gameDetail?.game.universeId ?? 0) > 0,
+    pollIntervalMs: 5_000,
     heartbeatMs: 250,
     fetchLatest:
-      gameDetail?.game.universeId != null
+      isLiveRange && gameDetail?.game.universeId != null
         ? () => fetchGameLivePoint(gameDetail.game.universeId)
         : undefined,
   })
+  const observedCoverageSeconds = getCoverageSeconds(liveLine.data)
+  const chartWindowSeconds = isLiveRange
+    ? CHART_RANGE_SECONDS[chartRange]
+    : observedCoverageSeconds > 0
+      ? Math.min(CHART_RANGE_SECONDS[chartRange], observedCoverageSeconds + 300)
+      : CHART_RANGE_SECONDS[chartRange]
   const liveCoverageSeconds =
-    liveLine.data.length > 1
-      ? Math.max((liveLine.data.at(-1)?.time ?? 0) - (liveLine.data[0]?.time ?? 0), 0)
-      : 0
+    observedCoverageSeconds
   const liveCoverageNote =
     liveCoverageSeconds > 0 &&
     liveCoverageSeconds < CHART_RANGE_SECONDS[chartRange] * 0.75
-      ? `Showing ${formatDurationCompact(liveCoverageSeconds)} of recent samples in the ${chartRange} window.`
+      ? `Showing ${formatDurationCompact(liveCoverageSeconds)} of tracked samples in the ${chartRange} window.`
       : undefined
   const shareCardGame = gameDetail?.game
   const shareCardLiveCcu = liveLine.latestValue ?? shareCardGame?.playing ?? 0
@@ -1301,7 +1314,7 @@ export default function GamePage({
                       tone="positive"
                       color={TOKENS.colors.base}
                       height={320}
-                      window={CHART_RANGE_SECONDS[chartRange]}
+                      window={chartWindowSeconds}
                       loading
                     />
                   }
@@ -1772,7 +1785,7 @@ export default function GamePage({
                 chart={
                   <LiveLineChart
                     data={liveLine.data}
-                    window={CHART_RANGE_SECONDS[chartRange]}
+                    window={chartWindowSeconds}
                     tone={status.tone}
                     color={TOKENS.colors.base}
                     height={320}

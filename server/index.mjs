@@ -49,43 +49,18 @@ const CHART_RANGE_MS = {
 const GAME_ICON_CACHE_TTL_MS = 5 * 60 * 1000
 const GAME_PAGE_CORE_CACHE_TTL_MS = 60 * 1000
 const GAME_PAGE_FULL_CACHE_TTL_MS = 5 * 60 * 1000
+const GAME_LIVE_POINT_CACHE_TTL_MS = 2_000
 const CACHE_SWEEP_INTERVAL_MS = 60 * 1000
 
-const LIVE_DISCOVERY_CACHE_TTL_MS = Math.min(PLATFORM_CACHE_TTL_MS, 5_000)
+const LIVE_DISCOVERY_CACHE_TTL_MS = PLATFORM_CACHE_TTL_MS
 const execFileAsync = promisify(execFile)
 
 function getPlatformStatsCacheTtlMs(range) {
-  switch (range) {
-    case '30m':
-    case '1h':
-    case '24h':
-      return Math.min(PLATFORM_CACHE_TTL_MS, 5_000)
-    case '6h':
-      return Math.min(PLATFORM_CACHE_TTL_MS, 10_000)
-    case '7d':
-      return Math.min(PLATFORM_CACHE_TTL_MS, 20_000)
-    case '30d':
-      return Math.min(PLATFORM_CACHE_TTL_MS, 30_000)
-    default:
-      return Math.min(PLATFORM_CACHE_TTL_MS, 15_000)
-  }
+  return PLATFORM_CACHE_TTL_MS
 }
 
 function getBoardPayloadCacheTtlMs(range) {
-  switch (range) {
-    case '30m':
-    case '1h':
-    case '24h':
-      return Math.min(BOARD_CACHE_TTL_MS, 5_000)
-    case '6h':
-      return Math.min(BOARD_CACHE_TTL_MS, 10_000)
-    case '7d':
-      return Math.min(BOARD_CACHE_TTL_MS, 20_000)
-    case '30d':
-      return Math.min(BOARD_CACHE_TTL_MS, 30_000)
-    default:
-      return Math.min(BOARD_CACHE_TTL_MS, 15_000)
-  }
+  return BOARD_CACHE_TTL_MS
 }
 
 function getGamePagePayloadCacheTtlMs(range, detailLevel = 'full') {
@@ -164,10 +139,13 @@ const boardCache = new Map()
 const gamePageCache = new Map()
 const gameSupplementalCache = new Map()
 const gameIconRedirectCache = new Map()
+const gameLivePointCache = new Map()
+const platformDiscoveryRequestCache = new Map()
 const platformStatsRequestCache = new Map()
 const boardRequestCache = new Map()
 const gamePageRequestCache = new Map()
 const gameSupplementalRequestCache = new Map()
+const gameLivePointRequestCache = new Map()
 let lastBoardUniverseIds = []
 const ROBLOX_AUTH_COOKIE_HEADERS = [...new Set(
   ROBLOX_SECURITY_COOKIES.map((cookieValue) =>
@@ -682,10 +660,13 @@ function resetInMemoryCaches() {
   gamePageCache.clear()
   gameSupplementalCache.clear()
   gameIconRedirectCache.clear()
+  gameLivePointCache.clear()
+  platformDiscoveryRequestCache.clear()
   platformStatsRequestCache.clear()
   boardRequestCache.clear()
   gamePageRequestCache.clear()
   gameSupplementalRequestCache.clear()
+  gameLivePointRequestCache.clear()
   lastBoardUniverseIds = []
 }
 
@@ -1007,6 +988,7 @@ function sweepAllCaches() {
   sweepExpiredCache(gamePageCache, now)
   sweepExpiredCache(gameSupplementalCache, now)
   sweepExpiredCache(gameIconRedirectCache, now)
+  sweepExpiredCache(gameLivePointCache, now)
 }
 
 function chunkItems(items, size) {
@@ -2184,7 +2166,7 @@ async function fetchHomeRecommendationSet() {
     ROBLOX_AUTH_COOKIE_HEADERS.map((cookieHeader, index) =>
       fetchJson(
         'https://apis.roblox.com/discovery-api/omni-recommendation',
-        MAX_FETCH_RETRIES,
+        0,
         {
           method: 'POST',
           headers: buildRobloxAuthHeaders(cookieHeader, {
@@ -2270,7 +2252,13 @@ async function fetchPlatformDiscoverySet() {
     }
   }
 
-  try {
+  const pendingRequest = platformDiscoveryRequestCache.get(cacheKey)
+
+  if (pendingRequest) {
+    return pendingRequest
+  }
+
+  const request = (async () => {
     const [sortPayloads, homeRecommendationSet] = await Promise.all([
       Promise.all(
         PLATFORM_SORT_IDS.map(async (sortId) => ({
@@ -2390,7 +2378,7 @@ async function fetchPlatformDiscoverySet() {
       ...platformPayload,
       source,
     }
-  } catch (error) {
+  })().catch((error) => {
     const stalePlatform = readCacheEntry(platformCache, cacheKey)
     if (stalePlatform) {
       return {
@@ -2400,6 +2388,16 @@ async function fetchPlatformDiscoverySet() {
     }
 
     throw error
+  })
+
+  platformDiscoveryRequestCache.set(cacheKey, request)
+
+  try {
+    return await request
+  } finally {
+    if (platformDiscoveryRequestCache.get(cacheKey) === request) {
+      platformDiscoveryRequestCache.delete(cacheKey)
+    }
   }
 }
 
@@ -2549,36 +2547,65 @@ async function fetchUniverseGames(universeIds, options = {}) {
 }
 
 async function fetchGameLivePointPayload(universeId) {
+  const cacheKey = String(universeId)
+  const cachedPoint = readCache(gameLivePointCache, cacheKey)
+
+  if (cachedPoint) {
+    return cachedPoint
+  }
+
+  const pendingRequest = gameLivePointRequestCache.get(cacheKey)
+
+  if (pendingRequest) {
+    return pendingRequest
+  }
+
+  const request = (async () => {
+    try {
+      const response = await fetchJson(
+        `https://games.roblox.com/v1/games?universeIds=${universeId}`,
+      )
+      const game = response.data?.[0]
+
+      if (!game) {
+        const error = new Error('Game not found.')
+        error.statusCode = 404
+        throw error
+      }
+
+      const payload = {
+        universeId,
+        value: game.playing ?? 0,
+        timestamp: new Date().toISOString(),
+        source: 'live',
+      }
+      writeCache(gameLivePointCache, cacheKey, payload, GAME_LIVE_POINT_CACHE_TTL_MS)
+      return payload
+    } catch (error) {
+      const snapshotGame = getLatestSnapshotGames([universeId])[0]
+
+      if (!snapshotGame) {
+        throw error
+      }
+
+      const payload = {
+        universeId,
+        value: snapshotGame.playing,
+        timestamp: new Date().toISOString(),
+        source: STORE_SOURCE,
+      }
+      writeCache(gameLivePointCache, cacheKey, payload, GAME_LIVE_POINT_CACHE_TTL_MS)
+      return payload
+    }
+  })()
+
+  gameLivePointRequestCache.set(cacheKey, request)
+
   try {
-    const response = await fetchJson(
-      `https://games.roblox.com/v1/games?universeIds=${universeId}`,
-    )
-    const game = response.data?.[0]
-
-    if (!game) {
-      const error = new Error('Game not found.')
-      error.statusCode = 404
-      throw error
-    }
-
-    return {
-      universeId,
-      value: game.playing ?? 0,
-      timestamp: new Date().toISOString(),
-      source: 'live',
-    }
-  } catch (error) {
-    const snapshotGame = getLatestSnapshotGames([universeId])[0]
-
-    if (!snapshotGame) {
-      throw error
-    }
-
-    return {
-      universeId,
-      value: snapshotGame.playing,
-      timestamp: new Date().toISOString(),
-      source: STORE_SOURCE,
+    return await request
+  } finally {
+    if (gameLivePointRequestCache.get(cacheKey) === request) {
+      gameLivePointRequestCache.delete(cacheKey)
     }
   }
 }
@@ -2757,10 +2784,7 @@ async function fetchFullPlatformStats(range = '24h') {
   const cachedStats = readCache(platformStatsCache, range)
 
   if (cachedStats) {
-    return {
-      ...cachedStats,
-      source: 'live',
-    }
+    return cachedStats
   }
 
   const pendingRequest = platformStatsRequestCache.get(range)
@@ -2771,42 +2795,33 @@ async function fetchFullPlatformStats(range = '24h') {
 
   const request = (async () => {
     const staleStats = readStaleCacheValue(platformStatsCache, range)
-    const { startDatetime, endDatetime } = buildPlatformStatsWindow(range)
 
     try {
-      const response = await fetchJsonWithCurl(
-        FULL_PLATFORM_STATS_URL,
-        {
-          method: 'POST',
-          headers: {
-            Accept: 'application/json, text/plain, */*',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Content-Type': 'application/json',
-            Origin: 'https://ads.bloxbiz.com',
-            Referer: 'https://ads.bloxbiz.com/',
-            'User-Agent':
-              'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
-          },
-          body: JSON.stringify({
-            start_datetime: startDatetime,
-            end_datetime: endDatetime,
-          }),
-        },
-        0,
-      )
+      const boardPayload =
+        readCache(boardCache, range) ??
+        (await fetchPlatformBoardPayload(range, {
+          persistSnapshots: false,
+        }))
+      const boardDerivedStats = buildPlatformStatsFromBoardPayload(boardPayload, range)
 
-      const normalized = normalizePlatformStatsPayload(response?.data ?? response, 'live', range)
-      recordPlatformCurrentMetric(normalized.latest)
-      recordPlatformHistoryPoints(
-        normalized.timeline.map((entry) => ({
-          timestamp: entry.timestamp,
-          value: entry.value,
-          source: 'live',
-        })),
-        'live',
-      )
-      writeCache(platformStatsCache, range, normalized, getPlatformStatsCacheTtlMs(range))
-      return normalized
+      if (boardDerivedStats) {
+        recordPlatformCurrentMetric(boardDerivedStats.latest)
+        recordPlatformHistoryPoints(
+          boardDerivedStats.timeline.map((entry) => ({
+            timestamp: entry.timestamp,
+            value: entry.value,
+            source: boardPayload?.ops?.source ?? boardDerivedStats.source,
+          })),
+          boardPayload?.ops?.source ?? boardDerivedStats.source,
+        )
+        writeCache(
+          platformStatsCache,
+          range,
+          boardDerivedStats,
+          getPlatformStatsCacheTtlMs(range),
+        )
+        return boardDerivedStats
+      }
     } catch (error) {
       const storedStats = buildStoredPlatformStats(range)
 
@@ -2815,46 +2830,13 @@ async function fetchFullPlatformStats(range = '24h') {
         return storedStats
       }
 
-      const cachedBoard =
-        readCache(boardCache, range) ?? readStaleCacheValue(boardCache, range)
-      const cachedBoardDerivedStats = buildPlatformStatsFromBoardPayload(cachedBoard, range)
-
-      if (cachedBoardDerivedStats) {
-        writeCache(
-          platformStatsCache,
-          range,
-          cachedBoardDerivedStats,
-          getPlatformStatsCacheTtlMs(range),
-        )
-        return cachedBoardDerivedStats
-      }
-
-      try {
-        const boardPayload = await fetchPlatformBoardPayload(range, {
-          persistSnapshots: false,
-        })
-        const boardDerivedStats = buildPlatformStatsFromBoardPayload(boardPayload, range)
-
-        if (boardDerivedStats) {
-          writeCache(
-            platformStatsCache,
-            range,
-            boardDerivedStats,
-            getPlatformStatsCacheTtlMs(range),
-          )
-          return boardDerivedStats
-        }
-      } catch {
-        // Ignore board fallback failures and continue to stale platform cache below.
-      }
-
       if (staleStats) {
         return {
           ...staleStats,
           source: 'cache',
           status: {
             ...staleStats.status,
-            label: 'Full platform CCU using cache',
+            label: 'Platform CCU using cache',
           },
           latest: {
             ...staleStats.latest,
