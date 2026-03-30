@@ -2,8 +2,6 @@ import { createServer } from 'node:http'
 import { access, readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
-import { execFile } from 'node:child_process'
-import { promisify } from 'node:util'
 import { gunzipSync } from 'node:zlib'
 import {
   BOARD_CACHE_TTL_MS,
@@ -51,9 +49,9 @@ const GAME_PAGE_CORE_CACHE_TTL_MS = 60 * 1000
 const GAME_PAGE_FULL_CACHE_TTL_MS = 5 * 60 * 1000
 const GAME_LIVE_POINT_CACHE_TTL_MS = 2_000
 const CACHE_SWEEP_INTERVAL_MS = 60 * 1000
+const HOME_RECOMMENDATION_COOLDOWN_MS = 10 * 60 * 1000
 
 const LIVE_DISCOVERY_CACHE_TTL_MS = PLATFORM_CACHE_TTL_MS
-const execFileAsync = promisify(execFile)
 
 function getPlatformStatsCacheTtlMs(range) {
   return PLATFORM_CACHE_TTL_MS
@@ -74,7 +72,6 @@ const OFFICIAL_PLATFORM_SCALE = {
   value: '45M',
   dateLabel: 'Jan 13, 2026',
 }
-const FULL_PLATFORM_STATS_URL = 'https://portal-api.bloxbiz.com/games/platform_stats'
 const PLATFORM_SORT_IDS = [
   'top-playing-now',
   'top-trending',
@@ -277,6 +274,7 @@ let lastHomeFetchSortCount = 0
 let lastHomeFetchUniverseCount = 0
 let lastHomeFetchSeedSuccessCount = 0
 let lastHomeFetchSeedFailureCount = 0
+let lastHomeFetchCooldownUntil = null
 const startedAt = Date.now()
 const schedulerOwnerId = `api-server:${process.pid}:${randomUUID()}`
 let scheduledIngestInFlight = false
@@ -869,75 +867,6 @@ async function fetchJsonWithOptions(url, options = {}, retries = MAX_FETCH_RETRI
   }
 
   throw lastError ?? new Error('Unknown fetch failure')
-}
-
-async function fetchJsonWithCurl(url, { method = 'GET', headers = {}, body = null } = {}, retries = MAX_FETCH_RETRIES) {
-  let attempt = 0
-  let lastError = null
-
-  while (attempt <= retries) {
-    const args = [
-      '--silent',
-      '--show-error',
-      '--location',
-      '--http1.1',
-      '--request',
-      method,
-      '--url',
-      url,
-      '--max-time',
-      String(Math.max(1, Math.ceil(REQUEST_TIMEOUT_MS / 1_000))),
-      '--write-out',
-      '\n%{http_code}',
-    ]
-
-    for (const [name, value] of Object.entries(headers)) {
-      args.push('--header', `${name}: ${value}`)
-    }
-
-    if (body != null) {
-      args.push('--data-binary', body)
-    }
-
-    try {
-      const { stdout, stderr } = await execFileAsync('curl', args, {
-        maxBuffer: 10 * 1024 * 1024,
-      })
-
-      const lastNewlineIndex = stdout.lastIndexOf('\n')
-      const rawBody = lastNewlineIndex === -1 ? stdout : stdout.slice(0, lastNewlineIndex)
-      const rawStatus = lastNewlineIndex === -1 ? '' : stdout.slice(lastNewlineIndex + 1).trim()
-      const statusCode = Number.parseInt(rawStatus, 10)
-
-      if (!Number.isFinite(statusCode)) {
-        throw new Error(`curl returned an unreadable status code for ${url}: ${stderr || stdout}`)
-      }
-
-      if (statusCode < 200 || statusCode >= 300) {
-        const error = new Error(`Request failed ${statusCode}: ${rawBody}`)
-        error.statusCode = statusCode
-        throw error
-      }
-
-      return JSON.parse(rawBody)
-    } catch (error) {
-      lastError = error
-      const statusCode = error?.statusCode
-      const isRetryable =
-        statusCode === 429 ||
-        error?.code === 'ETIMEDOUT' ||
-        error?.code === 'ECONNRESET'
-
-      if (!isRetryable || attempt === retries) {
-        throw error
-      }
-
-      await sleep(RETRY_BASE_DELAY_MS * 2 ** attempt)
-      attempt += 1
-    }
-  }
-
-  throw lastError ?? new Error('Unknown curl failure')
 }
 
 function readCache(cache, key) {
@@ -2158,6 +2087,16 @@ async function fetchHomeRecommendationSet() {
     }
   }
 
+  if (
+    typeof lastHomeFetchCooldownUntil === 'string' &&
+    Date.parse(lastHomeFetchCooldownUntil) > Date.now()
+  ) {
+    return {
+      games: [],
+      discoveredSorts: [],
+    }
+  }
+
   lastHomeFetchAttemptedAt = new Date().toISOString()
   const discoveredByUniverseId = new Map()
   const discoveredSorts = []
@@ -2195,7 +2134,20 @@ async function fetchHomeRecommendationSet() {
     lastHomeFetchSucceededAt = null
     lastHomeFetchSortCount = 0
     lastHomeFetchUniverseCount = 0
+    if (firstError?.statusCode === 429) {
+      lastHomeFetchCooldownUntil = new Date(
+        Date.now() + HOME_RECOMMENDATION_COOLDOWN_MS,
+      ).toISOString()
+    }
     throw firstError instanceof Error ? firstError : new Error(lastHomeFetchError)
+  }
+
+  if (failedPayloads.some((result) => result.reason?.statusCode === 429)) {
+    lastHomeFetchCooldownUntil = new Date(
+      Date.now() + HOME_RECOMMENDATION_COOLDOWN_MS,
+    ).toISOString()
+  } else {
+    lastHomeFetchCooldownUntil = null
   }
 
   lastHomeFetchError = failedPayloads.length > 0
@@ -2610,16 +2562,6 @@ async function fetchGameLivePointPayload(universeId) {
   }
 }
 
-function buildPlatformStatsWindow(range = '24h') {
-  const endDatetime = new Date().toISOString()
-  const startDatetime = new Date(Date.now() - CHART_RANGE_MS[range]).toISOString()
-
-  return {
-    startDatetime,
-    endDatetime,
-  }
-}
-
 function buildPlatformTone(latestValue, timeline) {
   const previousPoint = timeline.length > 1 ? timeline.at(-2) : null
 
@@ -2636,55 +2578,6 @@ function buildPlatformTone(latestValue, timeline) {
   }
 
   return 'neutral'
-}
-
-function normalizePlatformStatsPayload(payload, source, range = '24h') {
-  const history = Array.isArray(payload?.ccu_history) ? payload.ccu_history : []
-  const timeline = limitTrendPoints(
-    history
-      .filter((entry) => Number.isFinite(entry?.playing) && entry?.process_timestamp)
-      .map((entry) => ({
-        label: formatTrendLabel(entry.process_timestamp),
-        timestamp: entry.process_timestamp,
-        value: entry.playing,
-      })),
-    getMaxTrendPoints(range),
-  )
-  const latestTimestamp =
-    payload?.latest_ccu_timestamp ??
-    timeline.at(-1)?.timestamp ??
-    new Date().toISOString()
-  const latestValue =
-    payload?.latest_ccu ??
-    timeline.at(-1)?.value ??
-    0
-  const tone = buildPlatformTone(latestValue, timeline)
-
-  return {
-    status: {
-      label:
-        source === 'live'
-          ? 'Full platform CCU live'
-          : 'Full platform CCU using cache',
-      detail: `${formatWholeNumber(latestValue)} players across Roblox right now.`,
-      tone,
-    },
-    source,
-    latest: {
-      value: latestValue,
-      timestamp: latestTimestamp,
-      source,
-    },
-    peak:
-      Number.isFinite(payload?.peak_ccu) && payload?.peak_ccu_timestamp
-        ? {
-            value: payload.peak_ccu,
-            timestamp: payload.peak_ccu_timestamp,
-          }
-        : null,
-    timeline,
-    tone,
-  }
 }
 
 function buildStoredPlatformStats(range = '24h') {
@@ -4524,6 +4417,7 @@ function getOpsMetrics() {
       lastAttemptedAt: lastHomeFetchAttemptedAt,
       lastSucceededAt: lastHomeFetchSucceededAt,
       lastError: lastHomeFetchError,
+      cooldownUntil: lastHomeFetchCooldownUntil,
       sortCount: lastHomeFetchSortCount,
       universeCount: lastHomeFetchUniverseCount,
       seedSuccessCount: lastHomeFetchSeedSuccessCount,
@@ -4565,6 +4459,7 @@ function getReadyStatus() {
       lastAttemptedAt: lastHomeFetchAttemptedAt,
       lastSucceededAt: lastHomeFetchSucceededAt,
       lastError: lastHomeFetchError,
+      cooldownUntil: lastHomeFetchCooldownUntil,
     },
     cache: {
       searchKeys: searchCache.size,
