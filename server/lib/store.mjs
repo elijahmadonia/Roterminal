@@ -6,6 +6,10 @@ export async function createStore() {
       const { createMemoryStore } = await import('./memory-store.mjs')
       return createMemoryStore()
     }
+    case 'postgres': {
+      const { createPostgresStore } = await import('./postgres-store.mjs')
+      return createPostgresStore()
+    }
     case 'sqlite': {
       const { createDatabase } = await import('./database.mjs')
       return createDatabase()

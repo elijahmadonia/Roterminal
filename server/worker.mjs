@@ -12,7 +12,7 @@ import {
   UNIVERSE_FETCH_BATCH_CONCURRENCY,
 } from './config.mjs'
 import { migrateLegacyJsonIfNeeded } from './lib/bootstrap.mjs'
-import { createDatabase } from './lib/database.mjs'
+import { createStore } from './lib/store.mjs'
 
 const PLATFORM_SORT_IDS = [
   'top-playing-now',
@@ -29,13 +29,12 @@ const ROBLOX_AUTH_COOKIE_HEADERS = [...new Set(
   ),
 )]
 
-const database = await createDatabase()
+const database = await createStore()
 await migrateLegacyJsonIfNeeded(database)
-database.recoverStaleIngestRuns()
+await database.recoverStaleIngestRuns()
 
 const schedulerOwnerId = `worker:${process.pid}:${crypto.randomUUID()}`
 let scheduledIngestInFlight = false
-let importJobsInFlight = false
 
 function sleep(ms) {
   return new Promise((resolve) => {
@@ -409,27 +408,34 @@ function mergeDiscoveredFallbackGames(fetchedGames, discoveryEntries) {
 }
 
 async function pollTrackedUniverses(trigger = 'worker') {
-  const ingestRunId = database.startIngestRun(trigger)
+  const ingestRunId = await database.startIngestRun(trigger)
 
   try {
-    const trackedUniverseIds = database.getTrackedUniverseIds()
+    const trackedUniverseIds = await database.getTrackedUniverseIds()
     const trackedIds = trackedUniverseIds.length > 0 ? trackedUniverseIds : DEFAULT_TRACKED_IDS
     const discoveredEntries = await fetchPlatformDiscoveryEntries()
     const discoveredUniverseIds = discoveredEntries.map((entry) => entry.universeId)
-    database.appendTrackedUniverseIds(discoveredUniverseIds, TRACKED_UNIVERSE_CAP)
+    await database.appendTrackedUniverseIds(discoveredUniverseIds, TRACKED_UNIVERSE_CAP)
     const snapshotUniverseIds = dedupeUniverseIds(trackedIds, discoveredUniverseIds)
     const snapshotGames = mergeDiscoveredFallbackGames(
       await fetchUniverseGames(snapshotUniverseIds),
       discoveredEntries,
     )
     const observedAt = new Date().toISOString()
+    const platformPoint = {
+      timestamp: observedAt,
+      value: snapshotGames.reduce((sum, game) => sum + (Number(game.playing) || 0), 0),
+      source: 'worker_live',
+    }
 
-    database.recordSnapshots(snapshotGames, {
+    await database.recordSnapshots(snapshotGames, {
       observedAt,
       source: 'worker_live',
     })
+    await database.recordPlatformCurrentMetric(platformPoint)
+    await database.recordPlatformHistoryPoints([platformPoint], 'worker_live')
 
-    database.finishIngestRun(ingestRunId, {
+    await database.finishIngestRun(ingestRunId, {
       status: 'success',
       source: 'worker_live',
       trackedUniverseCount: trackedIds.length,
@@ -442,10 +448,10 @@ async function pollTrackedUniverses(trigger = 'worker') {
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : 'Unknown ingestion failure'
 
-    database.finishIngestRun(ingestRunId, {
+    await database.finishIngestRun(ingestRunId, {
       status: 'failed',
       source: 'worker_live',
-      trackedUniverseCount: database.getTrackedUniverseIds().length,
+      trackedUniverseCount: (await database.getTrackedUniverseIds()).length,
       errorMessage,
     })
 
@@ -454,11 +460,11 @@ async function pollTrackedUniverses(trigger = 'worker') {
 }
 
 async function runScheduledIngest(trigger = 'worker_schedule') {
-  if (scheduledIngestInFlight || importJobsInFlight) {
+  if (scheduledIngestInFlight) {
     return
   }
 
-  const acquired = database.tryAcquireIngestLease('scheduler', schedulerOwnerId, {
+  const acquired = await database.tryAcquireIngestLease('scheduler', schedulerOwnerId, {
     ownerLabel: 'worker',
     ttlMs: INGEST_LEASE_TTL_MS,
   })
@@ -476,75 +482,10 @@ async function runScheduledIngest(trigger = 'worker_schedule') {
   }
 }
 
-async function processQueuedImportJobs() {
-  if (importJobsInFlight || scheduledIngestInFlight) {
-    return
-  }
-
-  importJobsInFlight = true
-
-  try {
-    while (true) {
-      const job = database.claimNextImportJob()
-
-      if (!job) {
-        break
-      }
-
-      try {
-        const payload = job.payload ?? {}
-        const historyResult = database.importHistoryBundle({
-          catalogEntries: Array.isArray(payload.catalogEntries) ? payload.catalogEntries : [],
-          observations: Array.isArray(payload.observations) ? payload.observations : [],
-          trackedUniverseIds: Array.isArray(payload.trackedUniverseIds) ? payload.trackedUniverseIds : [],
-          replaceTracked: Boolean(payload.replaceTracked),
-          trackedLimit: Number.isFinite(Number(payload.trackedLimit))
-            ? Number(payload.trackedLimit)
-            : TRACKED_UNIVERSE_CAP,
-          defaultSource:
-            typeof payload.defaultSource === 'string' && payload.defaultSource.length > 0
-              ? payload.defaultSource
-              : 'history_import',
-        })
-        const platformResult = database.importPlatformHistory(
-          Array.isArray(payload.platformHistoryPoints) ? payload.platformHistoryPoints : [],
-          {
-            defaultSource:
-              typeof payload.platformDefaultSource === 'string' && payload.platformDefaultSource.length > 0
-                ? payload.platformDefaultSource
-                : 'platform_history_import',
-          },
-        )
-
-        database.finishImportJob(job.id, {
-          status: 'completed',
-        })
-
-        console.log(
-          `[roterminal-worker] import job ${job.id} completed (${historyResult.observationsInsertedCount} observations, ${platformResult.importedCount} platform points)`,
-        )
-      } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : 'Unknown import failure'
-        database.finishImportJob(job.id, {
-          status: 'failed',
-          errorMessage,
-        })
-        console.error(`[roterminal-worker] import job ${job.id} failed`, error)
-      }
-    }
-  } finally {
-    importJobsInFlight = false
-  }
-}
-
 await runScheduledIngest('worker_boot')
-await processQueuedImportJobs()
 setInterval(() => {
   void runScheduledIngest('worker_schedule')
 }, INGEST_INTERVAL_MS)
-setInterval(() => {
-  void processQueuedImportJobs()
-}, 1_000)
 
 console.log(
   `[roterminal-worker] running with ${Math.round(INGEST_INTERVAL_MS / 60_000)} minute cadence`,

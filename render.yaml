@@ -1,10 +1,15 @@
+databases:
+  - name: roterminal-db
+    databaseName: roterminal
+    user: roterminal
+
 services:
   - type: web
     name: roterminal
     env: node
     plan: starter
     buildCommand: npm install && npm run build
-    startCommand: npm run start:server
+    startCommand: npm run start:api
     healthCheckPath: /ready
     envVars:
       - key: NODE_VERSION
@@ -12,15 +17,42 @@ services:
       - key: ROTERMINAL_SERVER_PORT
         value: 10000
       - key: ROTERMINAL_DATA_BACKEND
-        value: memory
+        value: postgres
       - key: ROTERMINAL_SERVER_ENABLE_SCHEDULED_INGEST
-        value: true
+        value: false
+      - key: ROTERMINAL_ALLOW_LIVE_READ_FALLBACK
+        value: false
       - key: ROTERMINAL_INGEST_INTERVAL_MINUTES
         value: 5
       - key: ROTERMINAL_INGEST_STALE_AFTER_MS
         value: 1200000
-      - key: ROTERMINAL_IMPORT_TOKEN
+      - key: DATABASE_URL
+        fromDatabase:
+          name: roterminal-db
+          property: connectionString
+      - key: ROBLOX_SECURITY_COOKIE
         sync: false
+      - key: ROBLOX_SECURITY_COOKIES
+        sync: false
+  - type: worker
+    name: roterminal-worker
+    env: node
+    plan: starter
+    buildCommand: npm install && npm run build
+    startCommand: npm run start:worker
+    envVars:
+      - key: NODE_VERSION
+        value: 24.1.0
+      - key: ROTERMINAL_DATA_BACKEND
+        value: postgres
+      - key: ROTERMINAL_INGEST_INTERVAL_MINUTES
+        value: 5
+      - key: ROTERMINAL_INGEST_STALE_AFTER_MS
+        value: 1200000
+      - key: DATABASE_URL
+        fromDatabase:
+          name: roterminal-db
+          property: connectionString
       - key: ROBLOX_SECURITY_COOKIE
         sync: false
       - key: ROBLOX_SECURITY_COOKIES

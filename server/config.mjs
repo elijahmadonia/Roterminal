@@ -64,6 +64,10 @@ export const LEGACY_STATE_PATH = path.join(DATA_DIR, 'roterminal-state.json')
 export const PORT = readNumberEnv('ROTERMINAL_SERVER_PORT', 8787)
 const IS_RENDER = process.env.RENDER?.trim().toLowerCase() === 'true'
 const RENDER_SERVICE_TYPE = readStringEnv('RENDER_SERVICE_TYPE', '')
+export const POSTGRES_URL = readStringEnv(
+  'ROTERMINAL_POSTGRES_URL',
+  readStringEnv('DATABASE_URL', ''),
+)
 export const SERVER_ENABLE_SCHEDULED_INGEST = readBooleanEnv(
   'ROTERMINAL_SERVER_ENABLE_SCHEDULED_INGEST',
   true,
@@ -95,7 +99,15 @@ export const REQUEST_TIMEOUT_MS = readNumberEnv(
 export const IMPORT_TOKEN = readStringEnv('ROTERMINAL_IMPORT_TOKEN', '')
 export const DATA_BACKEND = readStringEnv(
   'ROTERMINAL_DATA_BACKEND',
-  IS_RENDER && RENDER_SERVICE_TYPE === 'web' ? 'memory' : 'sqlite',
+  POSTGRES_URL
+    ? 'postgres'
+    : IS_RENDER && RENDER_SERVICE_TYPE === 'web'
+      ? 'memory'
+      : 'sqlite',
+)
+export const ALLOW_LIVE_READ_FALLBACK = readBooleanEnv(
+  'ROTERMINAL_ALLOW_LIVE_READ_FALLBACK',
+  DATA_BACKEND !== 'postgres',
 )
 export const ROBLOX_SECURITY_COOKIE = readStringEnv('ROBLOX_SECURITY_COOKIE', '')
 export const ROBLOX_SECURITY_COOKIES = [...new Set([
