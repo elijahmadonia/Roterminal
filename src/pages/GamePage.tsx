@@ -1089,14 +1089,6 @@ export default function GamePage({
   }, [sharePreviewUrl])
 
   useEffect(() => {
-    return () => {
-      if (inlineSharePreviewUrl) {
-        URL.revokeObjectURL(inlineSharePreviewUrl)
-      }
-    }
-  }, [inlineSharePreviewUrl])
-
-  useEffect(() => {
     setSharePreviewEnabled(false)
 
     if (!gameDetail?.game.universeId) {
@@ -1161,6 +1153,21 @@ export default function GamePage({
     })
   }
 
+  const blobToDataUrl = (blob: Blob) =>
+    new Promise<string>((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onloadend = () => {
+        if (typeof reader.result === 'string') {
+          resolve(reader.result)
+          return
+        }
+
+        reject(new Error('Unable to build share preview URL.'))
+      }
+      reader.onerror = () => reject(reader.error ?? new Error('Unable to read share preview blob.'))
+      reader.readAsDataURL(blob)
+    })
+
   useEffect(() => {
     let cancelled = false
 
@@ -1189,29 +1196,16 @@ export default function GamePage({
           backgroundImageUrl: selectedShareBackground,
           variant: selectedShareVariant,
         })
-        const objectUrl = URL.createObjectURL(blob)
+        const previewUrl = await blobToDataUrl(blob)
 
         if (cancelled) {
-          URL.revokeObjectURL(objectUrl)
           return
         }
 
-        setInlineSharePreviewUrl((current) => {
-          if (current) {
-            URL.revokeObjectURL(current)
-          }
-
-          return objectUrl
-        })
+        setInlineSharePreviewUrl(previewUrl)
       } catch {
         if (!cancelled) {
-          setInlineSharePreviewUrl((current) => {
-            if (current) {
-              URL.revokeObjectURL(current)
-            }
-
-            return null
-          })
+          setInlineSharePreviewUrl(null)
         }
       }
     })()
