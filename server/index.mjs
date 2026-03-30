@@ -111,6 +111,7 @@ const GAME_PAGE_SERVER_SAMPLE_MAX_PAGES = 10
 const GAME_PAGE_SERVER_SAMPLE_LIMIT = 100
 const GAME_PAGE_CREATOR_PORTFOLIO_LIMIT = 8
 const GAME_PAGE_COMPARABLE_LIMIT = 8
+const GAME_PAGE_PEER_POOL_LIMIT = 120
 const SCREENER_STOPWORDS = new Set([
   'a',
   'about',
@@ -4033,7 +4034,7 @@ async function fetchGamePagePayload(universeId, range = '24h', detailLevel = 'fu
 
   const trackedUniverseIds = getTrackedUniverseIds()
   const historyMap = getHistoryMap([universeId], getHistoryCutoffIso())
-  const peerGames = getLatestSnapshotGames(trackedUniverseIds)
+  const peerGames = getLatestSnapshotGames(trackedUniverseIds).slice(0, GAME_PAGE_PEER_POOL_LIMIT)
   const supplemental = await fetchGameSupplementalData(games[0], {
     allowNetwork: detailLevel === 'full',
   })
