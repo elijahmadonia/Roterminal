@@ -2406,7 +2406,13 @@ async function fetchFullPlatformStats(range = '24h') {
       {
         method: 'POST',
         headers: {
+          Accept: 'application/json, text/plain, */*',
+          'Accept-Language': 'en-US,en;q=0.9',
           'Content-Type': 'application/json',
+          Origin: 'https://ads.bloxbiz.com',
+          Referer: 'https://ads.bloxbiz.com/',
+          'User-Agent':
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
         },
         body: JSON.stringify({
           start_datetime: startDatetime,
