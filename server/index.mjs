@@ -310,16 +310,16 @@ const {
   countMetadataHistory,
   countObservations,
   countSnapshots,
+  enqueueImportJob,
   finishIngestRun,
   getActiveIngestLease,
   getHistoryMap,
+  getImportJobStats,
   getLatestIngestRun,
   getLatestSnapshotGames,
   getPlatformCurrentMetric,
   getPlatformHistoryPoints,
   getTrackedUniverseIds,
-  importHistoryBundle,
-  importPlatformHistory,
   recordGamePageSnapshot,
   recordPlatformCurrentMetric,
   recordPlatformHistoryPoints,
@@ -4137,6 +4137,7 @@ async function runScheduledIngest() {
 function getOpsMetrics() {
   const latestIngestRun = getLatestIngestRun()
   const activeLease = getActiveIngestLease('scheduler')
+  const importJobStats = getImportJobStats()
   const lastIngestedAtMs =
     typeof lastIngestedAt === 'string' ? Date.parse(lastIngestedAt) : Number.NaN
   const activeLeaseExpiresAtMs =
@@ -4188,6 +4189,7 @@ function getOpsMetrics() {
       seedSuccessCount: lastHomeFetchSeedSuccessCount,
       seedFailureCount: lastHomeFetchSeedFailureCount,
     },
+    importJobs: importJobStats,
     cache: {
       searchKeys: searchCache.size,
       gameKeys: gamesCache.size,
@@ -4462,7 +4464,7 @@ const server = createServer(async (request, response) => {
           ? gunzipSync(rawBody)
           : rawBody
       const payload = JSON.parse(decodedBody.toString('utf8'))
-      const result = importHistoryBundle({
+      const queuedPayload = {
         catalogEntries: Array.isArray(payload?.catalogEntries) ? payload.catalogEntries : [],
         observations: Array.isArray(payload?.observations) ? payload.observations : [],
         trackedUniverseIds: Array.isArray(payload?.trackedUniverseIds) ? payload.trackedUniverseIds : [],
@@ -4474,23 +4476,24 @@ const server = createServer(async (request, response) => {
           typeof payload?.defaultSource === 'string' && payload.defaultSource.length > 0
             ? payload.defaultSource
             : 'history_import',
-      })
-      const platformResult = importPlatformHistory(
-        Array.isArray(payload?.platformHistoryPoints) ? payload.platformHistoryPoints : [],
-        {
-          defaultSource:
-            typeof payload?.platformDefaultSource === 'string' && payload.platformDefaultSource.length > 0
-              ? payload.platformDefaultSource
-              : typeof payload?.defaultSource === 'string' && payload.defaultSource.length > 0
-                ? payload.defaultSource
-                : 'platform_history_import',
+        platformHistoryPoints: Array.isArray(payload?.platformHistoryPoints) ? payload.platformHistoryPoints : [],
+        platformDefaultSource:
+          typeof payload?.platformDefaultSource === 'string' && payload.platformDefaultSource.length > 0
+            ? payload.platformDefaultSource
+            : typeof payload?.defaultSource === 'string' && payload.defaultSource.length > 0
+              ? payload.defaultSource
+              : 'platform_history_import',
+      }
+      const jobId = enqueueImportJob('history_import', queuedPayload)
+      return sendJson(response, 202, {
+        accepted: true,
+        jobId,
+        counts: {
+          catalogEntries: queuedPayload.catalogEntries.length,
+          observations: queuedPayload.observations.length,
+          trackedUniverseIds: queuedPayload.trackedUniverseIds.length,
+          platformHistoryPoints: queuedPayload.platformHistoryPoints.length,
         },
-      )
-
-      resetInMemoryCaches()
-      return sendJson(response, 200, {
-        ...result,
-        platformHistoryImportedCount: platformResult.importedCount,
       })
     }
 

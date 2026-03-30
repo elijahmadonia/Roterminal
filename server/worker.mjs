@@ -35,6 +35,7 @@ database.recoverStaleIngestRuns()
 
 const schedulerOwnerId = `worker:${process.pid}:${crypto.randomUUID()}`
 let scheduledIngestInFlight = false
+let importJobsInFlight = false
 
 function sleep(ms) {
   return new Promise((resolve) => {
@@ -453,7 +454,7 @@ async function pollTrackedUniverses(trigger = 'worker') {
 }
 
 async function runScheduledIngest(trigger = 'worker_schedule') {
-  if (scheduledIngestInFlight) {
+  if (scheduledIngestInFlight || importJobsInFlight) {
     return
   }
 
@@ -475,10 +476,75 @@ async function runScheduledIngest(trigger = 'worker_schedule') {
   }
 }
 
+async function processQueuedImportJobs() {
+  if (importJobsInFlight || scheduledIngestInFlight) {
+    return
+  }
+
+  importJobsInFlight = true
+
+  try {
+    while (true) {
+      const job = database.claimNextImportJob()
+
+      if (!job) {
+        break
+      }
+
+      try {
+        const payload = job.payload ?? {}
+        const historyResult = database.importHistoryBundle({
+          catalogEntries: Array.isArray(payload.catalogEntries) ? payload.catalogEntries : [],
+          observations: Array.isArray(payload.observations) ? payload.observations : [],
+          trackedUniverseIds: Array.isArray(payload.trackedUniverseIds) ? payload.trackedUniverseIds : [],
+          replaceTracked: Boolean(payload.replaceTracked),
+          trackedLimit: Number.isFinite(Number(payload.trackedLimit))
+            ? Number(payload.trackedLimit)
+            : TRACKED_UNIVERSE_CAP,
+          defaultSource:
+            typeof payload.defaultSource === 'string' && payload.defaultSource.length > 0
+              ? payload.defaultSource
+              : 'history_import',
+        })
+        const platformResult = database.importPlatformHistory(
+          Array.isArray(payload.platformHistoryPoints) ? payload.platformHistoryPoints : [],
+          {
+            defaultSource:
+              typeof payload.platformDefaultSource === 'string' && payload.platformDefaultSource.length > 0
+                ? payload.platformDefaultSource
+                : 'platform_history_import',
+          },
+        )
+
+        database.finishImportJob(job.id, {
+          status: 'completed',
+        })
+
+        console.log(
+          `[roterminal-worker] import job ${job.id} completed (${historyResult.observationsInsertedCount} observations, ${platformResult.importedCount} platform points)`,
+        )
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : 'Unknown import failure'
+        database.finishImportJob(job.id, {
+          status: 'failed',
+          errorMessage,
+        })
+        console.error(`[roterminal-worker] import job ${job.id} failed`, error)
+      }
+    }
+  } finally {
+    importJobsInFlight = false
+  }
+}
+
 await runScheduledIngest('worker_boot')
+await processQueuedImportJobs()
 setInterval(() => {
   void runScheduledIngest('worker_schedule')
 }, INGEST_INTERVAL_MS)
+setInterval(() => {
+  void processQueuedImportJobs()
+}, 1_000)
 
 console.log(
   `[roterminal-worker] running with ${Math.round(INGEST_INTERVAL_MS / 60_000)} minute cadence`,

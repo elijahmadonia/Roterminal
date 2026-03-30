@@ -517,6 +517,27 @@ const MIGRATIONS = [
       `)
     },
   },
+  {
+    id: '009_import_jobs',
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS import_jobs (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          job_type TEXT NOT NULL,
+          payload_json TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'queued',
+          attempts INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          started_at TEXT,
+          finished_at TEXT,
+          error_message TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_import_jobs_status_created
+          ON import_jobs(status, created_at ASC);
+      `)
+    },
+  },
 ]
 
 function applyMigrations(db) {
@@ -786,6 +807,54 @@ export async function createDatabase() {
       playing = excluded.playing,
       source = excluded.source,
       imported_at = CURRENT_TIMESTAMP
+  `)
+
+  const enqueueImportJobStmt = db.prepare(`
+    INSERT INTO import_jobs (
+      job_type,
+      payload_json
+    )
+    VALUES (?, ?)
+  `)
+
+  const getNextQueuedImportJobStmt = db.prepare(`
+    SELECT
+      id,
+      job_type,
+      payload_json,
+      attempts,
+      created_at
+    FROM import_jobs
+    WHERE status = 'queued'
+    ORDER BY id ASC
+    LIMIT 1
+  `)
+
+  const claimImportJobStmt = db.prepare(`
+    UPDATE import_jobs
+    SET
+      status = 'running',
+      attempts = attempts + 1,
+      started_at = ?,
+      error_message = NULL
+    WHERE id = ? AND status = 'queued'
+  `)
+
+  const finishImportJobStmt = db.prepare(`
+    UPDATE import_jobs
+    SET
+      status = ?,
+      finished_at = ?,
+      error_message = ?
+    WHERE id = ?
+  `)
+
+  const importJobStatsStmt = db.prepare(`
+    SELECT
+      status,
+      COUNT(*) AS total
+    FROM import_jobs
+    GROUP BY status
   `)
 
   const insertObservationStmt = db.prepare(`
@@ -1848,6 +1917,65 @@ export async function createDatabase() {
     }
   }
 
+  function enqueueImportJob(jobType, payload) {
+    const result = enqueueImportJobStmt.run(
+      jobType,
+      JSON.stringify(payload ?? {}),
+    )
+
+    return result.lastInsertRowid
+  }
+
+  function claimNextImportJob() {
+    const row = getNextQueuedImportJobStmt.get()
+
+    if (!row) {
+      return null
+    }
+
+    const startedAt = new Date().toISOString()
+    const result = claimImportJobStmt.run(startedAt, row.id)
+
+    if ((result.changes ?? 0) === 0) {
+      return null
+    }
+
+    return {
+      id: row.id,
+      jobType: row.job_type,
+      attempts: row.attempts + 1,
+      createdAt: row.created_at,
+      payload: JSON.parse(row.payload_json),
+    }
+  }
+
+  function finishImportJob(id, { status = 'completed', errorMessage = null } = {}) {
+    finishImportJobStmt.run(
+      status,
+      new Date().toISOString(),
+      errorMessage,
+      id,
+    )
+  }
+
+  function getImportJobStats() {
+    const rows = importJobStatsStmt.all()
+    const stats = {
+      queued: 0,
+      running: 0,
+      completed: 0,
+      failed: 0,
+    }
+
+    for (const row of rows) {
+      if (Object.hasOwn(stats, row.status)) {
+        stats[row.status] = row.total
+      }
+    }
+
+    return stats
+  }
+
   function searchLocalGames(query, limit = 8) {
     const normalized = `%${query.trim().toLowerCase()}%`
     const rows = db
@@ -2347,10 +2475,14 @@ export async function createDatabase() {
     countSnapshots,
     countTrackedUniverseIds: () => countTrackedStmt.get().total,
     appendTrackedUniverseIds,
+    claimNextImportJob,
+    enqueueImportJob,
     finishExternalHistoryImportRun,
+    finishImportJob,
     finishIngestRun,
     getActiveIngestLease,
     getHistoryMap,
+    getImportJobStats,
     getLatestIngestRun,
     getLatestSnapshotGames,
     getPlatformCurrentMetric,
