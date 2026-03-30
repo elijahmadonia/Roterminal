@@ -316,10 +316,13 @@ const {
   getLatestIngestRun,
   getLatestSnapshotGames,
   getPlatformCurrentMetric,
+  getPlatformHistoryPoints,
   getTrackedUniverseIds,
   importHistoryBundle,
+  importPlatformHistory,
   recordGamePageSnapshot,
   recordPlatformCurrentMetric,
+  recordPlatformHistoryPoints,
   recordSnapshots,
   recoverStaleIngestRuns,
   replaceTrackedUniverseIds,
@@ -2505,6 +2508,53 @@ function normalizePlatformStatsPayload(payload, source, range = '24h') {
   }
 }
 
+function buildStoredPlatformStats(range = '24h') {
+  const cutoffIso = new Date(Date.now() - CHART_RANGE_MS[range]).toISOString()
+  const storedHistory = getPlatformHistoryPoints(cutoffIso)
+  const timeline = limitTrendPoints(
+    storedHistory.map((entry) => ({
+      label: formatTrendLabel(entry.timestamp),
+      timestamp: entry.timestamp,
+      value: entry.value,
+    })),
+    getMaxTrendPoints(range),
+  )
+
+  const latestPoint = storedHistory.at(-1) ?? getPlatformCurrentMetric()
+
+  if (!latestPoint) {
+    return null
+  }
+
+  const peakPoint = timeline.reduce(
+    (current, entry) => (!current || entry.value > current.value ? entry : current),
+    null,
+  )
+  const tone = buildPlatformTone(latestPoint.value, timeline)
+
+  return {
+    status: {
+      label: 'Full platform CCU synced',
+      detail: `${formatWholeNumber(latestPoint.value)} players across Roblox right now.`,
+      tone,
+    },
+    source: 'synced',
+    latest: {
+      value: latestPoint.value,
+      timestamp: latestPoint.timestamp,
+      source: latestPoint.source ?? 'synced',
+    },
+    peak: peakPoint
+      ? {
+          value: peakPoint.value,
+          timestamp: peakPoint.timestamp,
+        }
+      : null,
+    timeline,
+    tone,
+  }
+}
+
 async function fetchFullPlatformStats(range = '24h') {
   const cachedStats = readCache(platformStatsCache, range)
 
@@ -2541,9 +2591,24 @@ async function fetchFullPlatformStats(range = '24h') {
 
     const normalized = normalizePlatformStatsPayload(response?.data ?? response, 'live', range)
     recordPlatformCurrentMetric(normalized.latest)
+    recordPlatformHistoryPoints(
+      normalized.timeline.map((entry) => ({
+        timestamp: entry.timestamp,
+        value: entry.value,
+        source: 'live',
+      })),
+      'live',
+    )
     writeCache(platformStatsCache, range, normalized, getPlatformStatsCacheTtlMs(range))
     return normalized
   } catch (error) {
+    const storedStats = buildStoredPlatformStats(range)
+
+    if (storedStats) {
+      writeCache(platformStatsCache, range, storedStats, getPlatformStatsCacheTtlMs(range))
+      return storedStats
+    }
+
     const staleStats = readCacheEntry(platformStatsCache, range)
 
     if (staleStats) {
@@ -4410,9 +4475,23 @@ const server = createServer(async (request, response) => {
             ? payload.defaultSource
             : 'history_import',
       })
+      const platformResult = importPlatformHistory(
+        Array.isArray(payload?.platformHistoryPoints) ? payload.platformHistoryPoints : [],
+        {
+          defaultSource:
+            typeof payload?.platformDefaultSource === 'string' && payload.platformDefaultSource.length > 0
+              ? payload.platformDefaultSource
+              : typeof payload?.defaultSource === 'string' && payload.defaultSource.length > 0
+                ? payload.defaultSource
+                : 'platform_history_import',
+        },
+      )
 
       resetInMemoryCaches()
-      return sendJson(response, 200, result)
+      return sendJson(response, 200, {
+        ...result,
+        platformHistoryImportedCount: platformResult.importedCount,
+      })
     }
 
     if (request.method === 'GET' && url.pathname === '/api/search') {

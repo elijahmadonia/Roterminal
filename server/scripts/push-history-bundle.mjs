@@ -9,6 +9,11 @@ function parseArgs(argv) {
     token: process.env.ROTERMINAL_IMPORT_TOKEN ?? '',
     dbPath: DB_PATH,
     batchSize: 5000,
+    batchDelayMs: 0,
+    retryCount: 20,
+    retryDelayMs: 5_000,
+    startAfterId: 0,
+    skipInitial: false,
     replaceTracked: false,
     defaultSource: 'local_history_import',
   }
@@ -40,6 +45,35 @@ function parseArgs(argv) {
       continue
     }
 
+    if (token === '--batch-delay-ms' && argv[index + 1]) {
+      args.batchDelayMs = Math.max(0, Number(argv[index + 1]) || args.batchDelayMs)
+      index += 1
+      continue
+    }
+
+    if (token === '--retry-count' && argv[index + 1]) {
+      args.retryCount = Math.max(0, Number(argv[index + 1]) || args.retryCount)
+      index += 1
+      continue
+    }
+
+    if (token === '--retry-delay-ms' && argv[index + 1]) {
+      args.retryDelayMs = Math.max(0, Number(argv[index + 1]) || args.retryDelayMs)
+      index += 1
+      continue
+    }
+
+    if (token === '--start-after-id' && argv[index + 1]) {
+      args.startAfterId = Math.max(0, Number(argv[index + 1]) || args.startAfterId)
+      index += 1
+      continue
+    }
+
+    if (token === '--skip-initial') {
+      args.skipInitial = true
+      continue
+    }
+
     if (token === '--replace-tracked') {
       args.replaceTracked = true
       continue
@@ -56,7 +90,7 @@ function parseArgs(argv) {
 
 function printUsage() {
   console.log(`Usage:
-  node server/scripts/push-history-bundle.mjs --url https://www.roterminal.co --token <token> [--db ./data/roterminal.db] [--batch-size 5000] [--replace-tracked] [--source local_history_import]`)
+  node server/scripts/push-history-bundle.mjs --url https://www.roterminal.co --token <token> [--db ./data/roterminal.db] [--batch-size 5000] [--batch-delay-ms 0] [--retry-count 20] [--retry-delay-ms 5000] [--start-after-id 0] [--skip-initial] [--replace-tracked] [--source local_history_import]`)
 }
 
 async function postImport(url, token, payload) {
@@ -85,6 +119,35 @@ async function postImport(url, token, payload) {
   }
 
   return parsed
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms)
+  })
+}
+
+async function postImportWithRetries(url, token, payload, retryCount, retryDelayMs) {
+  let attempt = 0
+
+  while (true) {
+    try {
+      return await postImport(url, token, payload)
+    } catch (error) {
+      const message = String(error?.message ?? '')
+      const shouldRetry =
+        attempt < retryCount &&
+        (message.includes(' 502 ') || message.includes(' 503 ') || message.includes(' 504 '))
+
+      if (!shouldRetry) {
+        throw error
+      }
+
+      attempt += 1
+      console.warn(`Retrying import request after transient failure (${attempt}/${retryCount})...`)
+      await sleep(retryDelayMs)
+    }
+  }
 }
 
 const args = parseArgs(process.argv.slice(2))
@@ -125,18 +188,20 @@ const observationCount = db.prepare(`
   FROM universe_observations
 `).get().total
 
-console.log(`Uploading catalog (${catalogEntries.length}) and tracked IDs (${trackedUniverseIds.length})...`)
+if (!args.skipInitial) {
+  console.log(`Uploading catalog (${catalogEntries.length}) and tracked IDs (${trackedUniverseIds.length})...`)
 
-const initialResult = await postImport(args.url, args.token, {
-  catalogEntries,
-  trackedUniverseIds,
-  replaceTracked: args.replaceTracked,
-  defaultSource: args.defaultSource,
-})
+  const initialResult = await postImportWithRetries(args.url, args.token, {
+    catalogEntries,
+    trackedUniverseIds,
+    replaceTracked: args.replaceTracked,
+    defaultSource: args.defaultSource,
+  }, args.retryCount, args.retryDelayMs)
 
-console.log(JSON.stringify(initialResult, null, 2))
+  console.log(JSON.stringify(initialResult, null, 2))
+}
 
-let lastId = 0
+let lastId = args.startAfterId
 let importedRows = 0
 
 while (true) {
@@ -163,13 +228,17 @@ while (true) {
 
   lastId = observations.at(-1).id
   const payloadObservations = observations.map(({ id: _id, ...row }) => row)
-  const result = await postImport(args.url, args.token, {
+  const result = await postImportWithRetries(args.url, args.token, {
     observations: payloadObservations,
     defaultSource: args.defaultSource,
-  })
+  }, args.retryCount, args.retryDelayMs)
 
   importedRows += payloadObservations.length
-  console.log(`Imported ${importedRows}/${observationCount} observations`, result)
+  console.log(`Imported ${importedRows} rows this run (last local id ${lastId}) / ${observationCount} total observations`, result)
+
+  if (args.batchDelayMs > 0) {
+    await sleep(args.batchDelayMs)
+  }
 }
 
 console.log('History import complete.')

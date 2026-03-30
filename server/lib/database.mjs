@@ -499,6 +499,24 @@ const MIGRATIONS = [
       `)
     },
   },
+  {
+    id: '008_platform_history_points',
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS platform_history_points (
+          metric_key TEXT NOT NULL,
+          observed_at TEXT NOT NULL,
+          playing INTEGER NOT NULL,
+          source TEXT NOT NULL,
+          imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY (metric_key, observed_at)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_platform_history_points_observed
+          ON platform_history_points(observed_at DESC);
+      `)
+    },
+  },
 ]
 
 function applyMigrations(db) {
@@ -744,6 +762,30 @@ export async function createDatabase() {
       source = excluded.source,
       updated_at = CURRENT_TIMESTAMP
     WHERE excluded.observed_at >= platform_current_metrics.observed_at
+  `)
+
+  const getPlatformHistorySinceStmt = db.prepare(`
+    SELECT
+      observed_at,
+      playing,
+      source
+    FROM platform_history_points
+    WHERE metric_key = ? AND observed_at >= ?
+    ORDER BY observed_at ASC
+  `)
+
+  const upsertPlatformHistoryPointStmt = db.prepare(`
+    INSERT INTO platform_history_points (
+      metric_key,
+      observed_at,
+      playing,
+      source
+    )
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(metric_key, observed_at) DO UPDATE SET
+      playing = excluded.playing,
+      source = excluded.source,
+      imported_at = CURRENT_TIMESTAMP
   `)
 
   const insertObservationStmt = db.prepare(`
@@ -1744,6 +1786,68 @@ export async function createDatabase() {
     )
   }
 
+  function getPlatformHistoryPoints(cutoffIso) {
+    const rows = getPlatformHistorySinceStmt.all('global', cutoffIso)
+    return rows.map((row) => ({
+      timestamp: row.observed_at,
+      value: row.playing,
+      source: row.source,
+    }))
+  }
+
+  function recordPlatformHistoryPoints(points, source = 'live') {
+    if (!Array.isArray(points) || points.length === 0) {
+      return 0
+    }
+
+    let importedCount = 0
+    let latestPoint = null
+
+    runInTransaction(() => {
+      for (const point of points) {
+        const timestamp = String(point?.timestamp ?? point?.observedAt ?? point?.observed_at ?? '')
+        const value = Number(point?.value ?? point?.playing)
+
+        if (!timestamp || !Number.isFinite(value)) {
+          continue
+        }
+
+        upsertPlatformHistoryPointStmt.run(
+          'global',
+          timestamp,
+          Math.round(value),
+          String(point?.source ?? source),
+        )
+        importedCount += 1
+
+        if (!latestPoint || Date.parse(timestamp) >= Date.parse(latestPoint.timestamp)) {
+          latestPoint = {
+            timestamp,
+            value,
+            source: String(point?.source ?? source),
+          }
+        }
+      }
+
+      if (latestPoint) {
+        recordPlatformCurrentMetric(latestPoint)
+      }
+    })
+
+    return importedCount
+  }
+
+  function importPlatformHistory(
+    points = [],
+    {
+      defaultSource = 'platform_history_import',
+    } = {},
+  ) {
+    return {
+      importedCount: recordPlatformHistoryPoints(points, defaultSource),
+    }
+  }
+
   function searchLocalGames(query, limit = 8) {
     const normalized = `%${query.trim().toLowerCase()}%`
     const rows = db
@@ -2250,11 +2354,14 @@ export async function createDatabase() {
     getLatestIngestRun,
     getLatestSnapshotGames,
     getPlatformCurrentMetric,
+    getPlatformHistoryPoints,
     getTrackedUniverseIds,
     importHistoryBundle,
+    importPlatformHistory,
     importLegacySnapshot,
     recordGamePageSnapshot,
     recordPlatformCurrentMetric,
+    recordPlatformHistoryPoints,
     recordExternalHistory,
     recordSnapshots,
     recoverStaleIngestRuns,
