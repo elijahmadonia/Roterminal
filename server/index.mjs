@@ -111,10 +111,7 @@ const GAME_PAGE_SERVER_SAMPLE_MAX_PAGES = 10
 const GAME_PAGE_SERVER_SAMPLE_LIMIT = 100
 const GAME_PAGE_CREATOR_PORTFOLIO_LIMIT = 8
 const GAME_PAGE_COMPARABLE_LIMIT = 8
-const GAME_PAGE_CORE_PEER_POOL_LIMIT = 24
 const GAME_PAGE_PEER_POOL_LIMIT = 120
-const GAME_PAGE_SUPPLEMENTAL_WAIT_MS = 1_500
-const DEFERRED_GAME_PAGE_CACHE_TTL_MS = 1_500
 const SCREENER_STOPWORDS = new Set([
   'a',
   'about',
@@ -163,7 +160,6 @@ const platformStatsCache = new Map()
 const boardCache = new Map()
 const gamePageCache = new Map()
 const gameSupplementalCache = new Map()
-const gameSupplementalInflight = new Map()
 const gameIconRedirectCache = new Map()
 let lastBoardUniverseIds = []
 const ROBLOX_AUTH_COOKIE_HEADERS = [...new Set(
@@ -565,7 +561,6 @@ function resetInMemoryCaches() {
   boardCache.clear()
   gamePageCache.clear()
   gameSupplementalCache.clear()
-  gameSupplementalInflight.clear()
   gameIconRedirectCache.clear()
   lastBoardUniverseIds = []
 }
@@ -3878,13 +3873,7 @@ function buildUnavailableGameSupplementalData(game) {
   }
 }
 
-async function fetchGameSupplementalData(
-  game,
-  {
-    allowNetwork = true,
-    waitBudgetMs = null,
-  } = {},
-) {
+async function fetchGameSupplementalData(game, { allowNetwork = true } = {}) {
   const cacheKey = String(game.universeId)
   const cached = readCache(gameSupplementalCache, cacheKey)
 
@@ -3896,75 +3885,45 @@ async function fetchGameSupplementalData(
     return buildUnavailableGameSupplementalData(game)
   }
 
-  const inflight =
-    gameSupplementalInflight.get(cacheKey) ??
-    (async () => {
-      try {
-        const [
-          pageMeta,
-          ageRating,
-          creatorProfile,
-          creatorPortfolio,
-          servers,
-          gamePasses,
-          developerProducts,
-        ] =
-          await Promise.all([
-            fetchRobloxGamePageMetadata(game.rootPlaceId),
-            fetchAgeRating(game.universeId),
-            fetchCreatorProfile(game),
-            fetchCreatorPortfolio(game),
-            fetchServerSample(game),
-            fetchGamePassInventory(game.universeId),
-            fetchDeveloperProductInventory(game.universeId),
-          ])
+  const [
+    pageMeta,
+    ageRating,
+    creatorProfile,
+    creatorPortfolio,
+    servers,
+    gamePasses,
+    developerProducts,
+  ] =
+    await Promise.all([
+      fetchRobloxGamePageMetadata(game.rootPlaceId),
+      fetchAgeRating(game.universeId),
+      fetchCreatorProfile(game),
+      fetchCreatorPortfolio(game),
+      fetchServerSample(game),
+      fetchGamePassInventory(game.universeId),
+      fetchDeveloperProductInventory(game.universeId),
+    ])
 
-        const supplemental = {
-          pageMeta,
-          ageRating,
-          creatorProfile,
-          creatorPortfolio,
-          servers,
-          store: {
-            gamePasses,
-            developerProducts,
-          },
-        }
-
-        writeCache(
-          gameSupplementalCache,
-          cacheKey,
-          supplemental,
-          GAME_SUPPLEMENTAL_CACHE_TTL_MS,
-        )
-
-        return supplemental
-      } finally {
-        gameSupplementalInflight.delete(cacheKey)
-      }
-    })()
-
-  if (!gameSupplementalInflight.has(cacheKey)) {
-    gameSupplementalInflight.set(cacheKey, inflight)
+  const supplemental = {
+    pageMeta,
+    ageRating,
+    creatorProfile,
+    creatorPortfolio,
+    servers,
+    store: {
+      gamePasses,
+      developerProducts,
+    },
   }
 
-  const normalizedWaitBudgetMs =
-    waitBudgetMs == null ? null : Math.max(Number(waitBudgetMs) || 0, 0)
+  writeCache(
+    gameSupplementalCache,
+    cacheKey,
+    supplemental,
+    GAME_SUPPLEMENTAL_CACHE_TTL_MS,
+  )
 
-  if (normalizedWaitBudgetMs == null || normalizedWaitBudgetMs <= 0) {
-    return inflight
-  }
-
-  const racedSupplemental = await Promise.race([
-    inflight,
-    sleep(normalizedWaitBudgetMs).then(() => null),
-  ])
-
-  return racedSupplemental ?? buildUnavailableGameSupplementalData(game)
-}
-
-function isDeferredGameSupplementalData(supplemental) {
-  return supplemental?.pageMeta?.source === 'Deferred supplemental fetch'
+  return supplemental
 }
 
 async function hydrateTrackedUniverses(universeIds, range = '24h') {
@@ -4075,14 +4034,10 @@ async function fetchGamePagePayload(universeId, range = '24h', detailLevel = 'fu
 
   const trackedUniverseIds = getTrackedUniverseIds()
   const historyMap = getHistoryMap([universeId], getHistoryCutoffIso())
-  const peerPoolLimit =
-    detailLevel === 'core' ? GAME_PAGE_CORE_PEER_POOL_LIMIT : GAME_PAGE_PEER_POOL_LIMIT
-  const peerGames = getLatestSnapshotGames(trackedUniverseIds).slice(0, peerPoolLimit)
+  const peerGames = getLatestSnapshotGames(trackedUniverseIds).slice(0, GAME_PAGE_PEER_POOL_LIMIT)
   const supplemental = await fetchGameSupplementalData(games[0], {
     allowNetwork: detailLevel === 'full',
-    waitBudgetMs: detailLevel === 'full' ? GAME_PAGE_SUPPLEMENTAL_WAIT_MS : 0,
   })
-  const hasDeferredSupplemental = isDeferredGameSupplementalData(supplemental)
   const payload = buildGameDetailPayload(
     games[0],
     historyMap,
@@ -4103,12 +4058,10 @@ async function fetchGamePagePayload(universeId, range = '24h', detailLevel = 'fu
     gamePageCache,
     cacheKey,
     payload,
-    hasDeferredSupplemental
-      ? Math.min(getGamePagePayloadCacheTtlMs(range, detailLevel), DEFERRED_GAME_PAGE_CACHE_TTL_MS)
-      : getGamePagePayloadCacheTtlMs(range, detailLevel),
+    getGamePagePayloadCacheTtlMs(range, detailLevel),
   )
 
-  if (detailLevel === 'full' && !hasDeferredSupplemental) {
+  if (detailLevel === 'full') {
     writeCache(
       gamePageCache,
       `${universeId}:${range}:core`,

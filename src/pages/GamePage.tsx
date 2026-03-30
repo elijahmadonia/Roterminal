@@ -38,7 +38,6 @@ import {
 type GamePageProps = {
   gameDetail: GameDetailResponse | null
   isLoading: boolean
-  isRefreshing: boolean
   error: string | null
   chartRange: ChartRange
   availableRanges: ChartRange[]
@@ -1058,7 +1057,6 @@ function ComparablePreview({ games }: { games: DetailComparableGame[] }) {
 export default function GamePage({
   gameDetail,
   isLoading,
-  isRefreshing,
   error,
   chartRange,
   availableRanges,
@@ -1762,31 +1760,11 @@ export default function GamePage({
                   letterSpacing: TOKENS.typography.heading1.letterSpacing,
                 }}
                 headerTrailing={
-                  <div
-                    style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: TOKENS.spacing.sm,
-                    }}
-                  >
-                    {isRefreshing ? (
-                      <span
-                        style={{
-                          color: TOKENS.colors.neutral2,
-                          fontSize: TOKENS.typography.body3.size,
-                          lineHeight: TOKENS.typography.body3.lineHeight,
-                          whiteSpace: 'nowrap',
-                        }}
-                      >
-                        Refreshing…
-                      </span>
-                    ) : null}
-                    <SegmentedControl
-                      options={availableRanges}
-                      value={chartRange}
-                      onChange={onChangeRange}
-                    />
-                  </div>
+                  <SegmentedControl
+                    options={availableRanges}
+                    value={chartRange}
+                    onChange={onChangeRange}
+                  />
                 }
                 points={timeline.map((point) => point.value)}
                 tone={status.tone}

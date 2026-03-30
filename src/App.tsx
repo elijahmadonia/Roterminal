@@ -46,7 +46,6 @@ export default function App() {
     data: gameDetail,
     error: gameError,
     isLoading: isGameLoading,
-    isRefreshing: isGameRefreshing,
   } = useGameDetail(selectedGameId, gameChartRange)
 
   useEffect(() => {
@@ -108,7 +107,6 @@ export default function App() {
       <GamePage
         gameDetail={gameDetail}
         isLoading={isGameLoading}
-        isRefreshing={isGameRefreshing}
         error={gameError}
         chartRange={gameChartRange}
         availableRanges={gameChartRanges}
