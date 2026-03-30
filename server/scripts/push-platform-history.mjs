@@ -17,6 +17,9 @@ function parseArgs(argv) {
     token: process.env.ROTERMINAL_IMPORT_TOKEN ?? '',
     range: '30d',
     batchSize: 1000,
+    startIndex: 0,
+    retryCount: 20,
+    retryDelayMs: 5_000,
     defaultSource: 'local_platform_sync',
   }
 
@@ -47,6 +50,24 @@ function parseArgs(argv) {
       continue
     }
 
+    if (token === '--start-index' && argv[index + 1]) {
+      args.startIndex = Math.max(0, Number(argv[index + 1]) || args.startIndex)
+      index += 1
+      continue
+    }
+
+    if (token === '--retry-count' && argv[index + 1]) {
+      args.retryCount = Math.max(0, Number(argv[index + 1]) || args.retryCount)
+      index += 1
+      continue
+    }
+
+    if (token === '--retry-delay-ms' && argv[index + 1]) {
+      args.retryDelayMs = Math.max(0, Number(argv[index + 1]) || args.retryDelayMs)
+      index += 1
+      continue
+    }
+
     if (token === '--source' && argv[index + 1]) {
       args.defaultSource = argv[index + 1]
       index += 1
@@ -58,7 +79,7 @@ function parseArgs(argv) {
 
 function printUsage() {
   console.log(`Usage:
-  node server/scripts/push-platform-history.mjs --url https://www.roterminal.co --token <token> [--range 30d] [--batch-size 1000] [--source local_platform_sync]`)
+  node server/scripts/push-platform-history.mjs --url https://www.roterminal.co --token <token> [--range 30d] [--batch-size 1000] [--start-index 0] [--retry-count 20] [--retry-delay-ms 5000] [--source local_platform_sync]`)
 }
 
 function buildWindow(range) {
@@ -125,13 +146,48 @@ async function postImport(url, token, payload) {
   })
 
   const text = await response.text()
-  const parsed = text ? JSON.parse(text) : {}
+  let parsed
+
+  try {
+    parsed = text ? JSON.parse(text) : {}
+  } catch {
+    parsed = { raw: text }
+  }
 
   if (!response.ok) {
     throw new Error(`Platform import failed: ${response.status} ${JSON.stringify(parsed).slice(0, 500)}`)
   }
 
   return parsed
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms)
+  })
+}
+
+async function postImportWithRetries(url, token, payload, retryCount, retryDelayMs) {
+  let attempt = 0
+
+  while (true) {
+    try {
+      return await postImport(url, token, payload)
+    } catch (error) {
+      const message = String(error?.message ?? '')
+      const shouldRetry =
+        attempt < retryCount &&
+        (message.includes(' 502 ') || message.includes(' 503 ') || message.includes(' 504 '))
+
+      if (!shouldRetry) {
+        throw error
+      }
+
+      attempt += 1
+      console.warn(`Retrying platform import after transient failure (${attempt}/${retryCount})...`)
+      await sleep(retryDelayMs)
+    }
+  }
 }
 
 const args = parseArgs(process.argv.slice(2))
@@ -145,12 +201,12 @@ const points = await fetchPlatformHistory(args.range)
 
 console.log(`Fetched ${points.length} platform points for ${args.range}.`)
 
-for (let index = 0; index < points.length; index += args.batchSize) {
+for (let index = args.startIndex; index < points.length; index += args.batchSize) {
   const batch = points.slice(index, index + args.batchSize)
-  const result = await postImport(args.url, args.token, {
+  const result = await postImportWithRetries(args.url, args.token, {
     platformHistoryPoints: batch,
     platformDefaultSource: args.defaultSource,
-  })
+  }, args.retryCount, args.retryDelayMs)
 
   console.log(`Imported ${Math.min(index + batch.length, points.length)}/${points.length} platform points`, result)
 }

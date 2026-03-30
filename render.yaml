@@ -4,7 +4,7 @@ services:
     env: node
     plan: starter
     buildCommand: npm install && npm run build
-    startCommand: npm run start:server
+    startCommand: npm run start
     healthCheckPath: /ready
     disk:
       name: roterminal-data

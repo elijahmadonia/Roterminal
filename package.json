@@ -6,17 +6,18 @@
   "scripts": {
     "dev": "concurrently \"npm:dev:server\" \"npm:dev:worker\" \"npm:dev:client\"",
     "dev:client": "vite",
-    "dev:server": "ROTERMINAL_SERVER_ENABLE_SCHEDULED_INGEST=false node server/index.mjs",
-    "dev:worker": "node server/worker.mjs",
+    "dev:server": "ROTERMINAL_SERVER_ENABLE_SCHEDULED_INGEST=false node --env-file-if-exists=.env server/index.mjs",
+    "dev:worker": "node --env-file-if-exists=.env server/worker.mjs",
     "build": "tsc -b && vite build",
     "build:client": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
     "import:history": "node server/scripts/import-external-history.mjs",
     "sync:tracked": "node server/scripts/sync-tracked-universes.mjs",
-    "start:api": "ROTERMINAL_SERVER_ENABLE_SCHEDULED_INGEST=false node server/index.mjs",
-    "start:server": "node server/index.mjs",
-    "start:worker": "node server/worker.mjs"
+    "start": "concurrently --kill-others-on-fail \"npm:start:api\" \"npm:start:worker\"",
+    "start:api": "ROTERMINAL_SERVER_ENABLE_SCHEDULED_INGEST=false node --env-file-if-exists=.env server/index.mjs",
+    "start:server": "node --env-file-if-exists=.env server/index.mjs",
+    "start:worker": "node --env-file-if-exists=.env server/worker.mjs"
   },
   "dependencies": {
     "@fontsource-variable/geist": "^5.2.8",
