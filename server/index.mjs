@@ -3889,17 +3889,28 @@ async function pollTrackedUniverses() {
 
   try {
     const payload = await fetchPlatformBoardPayload('24h')
+    const discoveredUniverseIds = lastBoardUniverseIds.length > 0
+      ? lastBoardUniverseIds
+      : payload.leaderboard?.map((entry) => entry.universeId) ?? []
+
+    if (discoveredUniverseIds.length > 0) {
+      appendTrackedUniverseIds(discoveredUniverseIds, TRACKED_UNIVERSE_CAP)
+    }
+
+    const trackedUniverseCount = getTrackedUniverseIds().length
     lastIngestedAt = new Date().toISOString()
     lastIngestError = null
 
     finishIngestRun(ingestRunId, {
       status: 'success',
       source: payload.ops?.source ?? 'live',
-      trackedUniverseCount: getTrackedUniverseIds().length,
-      discoveredUniverseCount: payload.topExperiences?.length ?? 0,
+      trackedUniverseCount,
+      discoveredUniverseCount: discoveredUniverseIds.length,
     })
 
-    console.log('[roterminal-server] ingested platform discovery set')
+    console.log(
+      `[roterminal-server] ingested platform discovery set (${trackedUniverseCount} tracked, ${discoveredUniverseIds.length} discovered)`,
+    )
   } catch (error) {
     lastIngestError = error instanceof Error ? error.message : 'Unknown ingestion failure'
     finishIngestRun(ingestRunId, {

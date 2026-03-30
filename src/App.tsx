@@ -14,7 +14,7 @@ type AppRoute =
   | { kind: 'components' }
   | { kind: 'game'; universeId: number }
 
-const gameChartRanges: ChartRange[] = ['30m', '1h', '6h', '24h', '7d']
+const gameChartRanges: ChartRange[] = ['30m', '1h', '6h', '24h', '7d', '30d']
 
 function parseRoute(pathname: string): AppRoute {
   if (pathname === '/') {
