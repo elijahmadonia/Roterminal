@@ -1364,7 +1364,7 @@ async function fetchScreenerPayload(query) {
   const universeIds = [...candidateIds].slice(0, SCREENER_SEARCH_LIMIT + trackedIds.length)
   const { games, source } = await fetchUniverseGames(universeIds)
 
-  if (source !== 'database') {
+  if (!SERVER_ENABLE_SCHEDULED_INGEST && source !== 'database') {
     recordSnapshots(games)
   }
 
@@ -3982,7 +3982,7 @@ async function hydrateTrackedUniverses(universeIds, range = '24h') {
   const uniqueIds = [...new Set(ids.length > 0 ? ids : DEFAULT_TRACKED_IDS)]
   const { games, source } = await fetchUniverseGames(uniqueIds)
 
-  if (source === 'live' && SERVER_ENABLE_SCHEDULED_INGEST) {
+  if (source === 'live' && !SERVER_ENABLE_SCHEDULED_INGEST) {
     recordSnapshots(games)
   }
   replaceTrackedUniverseIds(uniqueIds)
@@ -3991,7 +3991,10 @@ async function hydrateTrackedUniverses(universeIds, range = '24h') {
   return buildBoardPayload(games, historyMap, source, range)
 }
 
-async function fetchPlatformBoardPayload(range = '24h') {
+async function fetchPlatformBoardPayload(
+  range = '24h',
+  { persistSnapshots = !SERVER_ENABLE_SCHEDULED_INGEST } = {},
+) {
   const cachedBoard = readCache(boardCache, range)
 
   if (cachedBoard) {
@@ -4014,7 +4017,7 @@ async function fetchPlatformBoardPayload(range = '24h') {
     trackedLiveFallback.source === 'live' ? trackedLiveFallback.games : [],
   )
 
-  if (SERVER_ENABLE_SCHEDULED_INGEST && liveSnapshotGames.length > 0) {
+  if (persistSnapshots && liveSnapshotGames.length > 0) {
     recordSnapshots(liveSnapshotGames, {
       observedAt: new Date().toISOString(),
     })
@@ -4104,7 +4107,7 @@ async function fetchGamePagePayload(universeId, range = '24h', detailLevel = 'fu
         throw error
       }
 
-      if (source === 'live' && SERVER_ENABLE_SCHEDULED_INGEST) {
+      if (source === 'live' && !SERVER_ENABLE_SCHEDULED_INGEST) {
         recordSnapshots(games)
       }
 
@@ -4126,7 +4129,7 @@ async function fetchGamePagePayload(universeId, range = '24h', detailLevel = 'fu
         range,
       )
 
-      if (detailLevel === 'full') {
+      if (detailLevel === 'full' && !SERVER_ENABLE_SCHEDULED_INGEST) {
         recordGamePageSnapshot(payload, {
           source: `game_page_${source}`,
         })
@@ -4175,7 +4178,9 @@ async function pollTrackedUniverses() {
   const ingestRunId = startIngestRun('scheduler')
 
   try {
-    const payload = await fetchPlatformBoardPayload('24h')
+    const payload = await fetchPlatformBoardPayload('24h', {
+      persistSnapshots: true,
+    })
     const discoveredUniverseIds = lastBoardUniverseIds.length > 0
       ? lastBoardUniverseIds
       : payload.leaderboard?.map((entry) => entry.universeId) ?? []
