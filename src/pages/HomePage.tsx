@@ -91,9 +91,6 @@ export default function HomePage({
 }: HomePageProps) {
   const [heroRange, setHeroRange] = useState<'Live' | '1D' | '1W' | '1M'>('1D')
   const [hiddenTopThreeIds, setHiddenTopThreeIds] = useState<number[]>([])
-  const [quickLookupValue, setQuickLookupValue] = useState('')
-  const [quickLookupError, setQuickLookupError] = useState<string | null>(null)
-  const [isQuickLookupPending, setIsQuickLookupPending] = useState(false)
   const [gamesView, setGamesView] = useState<
     'Top Games' | 'Trending' | 'Gainers' | 'Losers' | 'Breakouts'
   >('Top Games')
@@ -544,26 +541,6 @@ export default function HomePage({
       })
   }, [topLeaderboard])
 
-  const handleQuickLookup = useCallback(async () => {
-    const value = quickLookupValue.trim()
-
-    if (!value) {
-      setQuickLookupError('Enter a game name, universe ID, place ID, or Roblox URL.')
-      return
-    }
-
-    try {
-      setIsQuickLookupPending(true)
-      setQuickLookupError(null)
-      await onOpenGame({ name: value })
-    } catch (error) {
-      console.error(error)
-      setQuickLookupError('Lookup failed. Try the exact game name or a Roblox game URL.')
-    } finally {
-      setIsQuickLookupPending(false)
-    }
-  }, [onOpenGame, quickLookupValue])
-
   return (
     <div
       style={{
@@ -606,7 +583,7 @@ export default function HomePage({
               <div
                 style={{
                   display: 'grid',
-                  gap: '8px',
+                  gap: TOKENS.spacing.xs,
                   minWidth: 'min(100%, 420px)',
                   flex: '1 1 420px',
                 }}
@@ -619,61 +596,27 @@ export default function HomePage({
                     flexWrap: 'wrap',
                   }}
                 >
-                  <input
-                    type="text"
-                    value={quickLookupValue}
-                    onChange={(event) => {
-                      setQuickLookupValue(event.target.value)
-                      if (quickLookupError) {
-                        setQuickLookupError(null)
-                      }
-                    }}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Enter') {
-                        event.preventDefault()
-                        void handleQuickLookup()
-                      }
-                    }}
-                    placeholder="Open any game by name, universe ID, place ID, or URL"
+                  <span
                     style={{
-                      flex: '1 1 320px',
-                      minWidth: '260px',
-                      height: '40px',
-                      padding: '0 14px',
-                      borderRadius: '12px',
-                      border: `1px solid ${TOKENS.colors.surface4}`,
-                      background: TOKENS.colors.surface2,
                       color: TOKENS.colors.neutral1,
-                      outline: 'none',
-                    }}
-                  />
-                  <button
-                    type="button"
-                    onClick={() => void handleQuickLookup()}
-                    disabled={isQuickLookupPending}
-                    style={{
-                      height: '40px',
-                      padding: '0 14px',
-                      borderRadius: '12px',
-                      border: `1px solid ${TOKENS.colors.surface4}`,
-                      background: isQuickLookupPending ? TOKENS.colors.surface3 : TOKENS.colors.base,
-                      color: TOKENS.colors.neutral1,
-                      cursor: isQuickLookupPending ? 'wait' : 'pointer',
+                      fontSize: TOKENS.typography.heading2.size,
+                      lineHeight: TOKENS.typography.heading2.lineHeight,
+                      fontWeight: TOKENS.typography.heading2.weight,
+                      letterSpacing: TOKENS.typography.heading2.letterSpacing,
                     }}
                   >
-                    {isQuickLookupPending ? 'Opening...' : 'Open Game'}
-                  </button>
+                    Roblox market pulse
+                  </span>
                 </div>
 
                 <div
                   style={{
-                    color: quickLookupError ? TOKENS.colors.warning : TOKENS.colors.neutral3,
+                    color: TOKENS.colors.neutral3,
                     fontSize: TOKENS.typography.body3.size,
                     lineHeight: TOKENS.typography.body3.lineHeight,
                   }}
                 >
-                  {quickLookupError ??
-                    `Jump straight to any game page. The board below now shows ${Math.min(HOME_TABLE_ROW_LIMIT, topLeaderboard.length)} rows.`}
+                  Search moved to the left rail. The board below shows {Math.min(HOME_TABLE_ROW_LIMIT, topLeaderboard.length)} rows from the current live index.
                 </div>
               </div>
 
