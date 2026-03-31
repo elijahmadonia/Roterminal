@@ -623,7 +623,9 @@ export default function AppShell({
       <aside className="app-shell__sidebar" aria-label="Primary">
         <div className="app-shell__sidebarFrame">
           <div className="app-shell__group">
-            <LogoMark onClick={onOpenHome} />
+            <div className="app-shell__logoMark">
+              <LogoMark onClick={onOpenHome} />
+            </div>
 
             <div className="app-shell__group app-shell__group--primary">
               <RailButton

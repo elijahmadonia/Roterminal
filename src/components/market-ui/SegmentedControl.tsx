@@ -22,7 +22,9 @@ export function SegmentedControl<T extends string>({
       style={{
         display: 'inline-flex',
         alignItems: 'center',
+        flexWrap: 'wrap',
         gap: '3px',
+        maxWidth: '100%',
         padding: '3px',
         borderRadius: TOKENS.radii.pill,
         border: `1px solid ${TOKENS.colors.neutral4}66`,
@@ -42,6 +44,7 @@ export function SegmentedControl<T extends string>({
             style={{
               minHeight: size === 'sm' ? '30px' : '34px',
               padding: size === 'sm' ? '0 12px' : '0 14px',
+              flexShrink: 0,
               border: 'none',
               borderRadius: TOKENS.radii.pill,
               background:

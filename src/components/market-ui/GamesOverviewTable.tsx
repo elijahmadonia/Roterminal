@@ -3,6 +3,7 @@ import { useMemo, useState } from 'react'
 import { ArrowDown } from 'lucide-react'
 
 import { TOKENS } from '../../design/marketTokens'
+import { useViewportWidth } from '../../hooks/useViewportWidth'
 import { PercentNumber } from '../ui/AnimatedNumber'
 import { MiniTrendChart } from './MiniTrendChart'
 import { Skeleton } from './Skeleton'
@@ -129,6 +130,49 @@ function CompactHeaderButton({
   )
 }
 
+function MobileSortButton({
+  label,
+  active = false,
+  direction = 'desc',
+  onClick,
+}: {
+  label: string
+  active?: boolean
+  direction?: 'asc' | 'desc'
+  onClick: () => void
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: '6px',
+        minHeight: '34px',
+        padding: '0 12px',
+        borderRadius: TOKENS.radii.pill,
+        border: `1px solid ${active ? TOKENS.colors.neutral4 : `${TOKENS.colors.surface3}`}`,
+        background: active ? TOKENS.colors.surface2 : 'transparent',
+        color: active ? TOKENS.colors.neutral1 : TOKENS.colors.neutral2,
+        fontSize: TOKENS.typography.body3.size,
+        lineHeight: TOKENS.typography.body3.lineHeight,
+        fontWeight: 600,
+        cursor: 'pointer',
+      }}
+    >
+      <span>{label}</span>
+      {active ? (
+        <ArrowDown
+          size={12}
+          strokeWidth={2.4}
+          style={{ transform: direction === 'asc' ? 'rotate(180deg)' : undefined }}
+        />
+      ) : null}
+    </button>
+  )
+}
+
 function DeltaValue({ value }: { value: number }) {
   const tone =
     value > 0
@@ -248,6 +292,8 @@ export function GamesOverviewTable(props: GamesOverviewTableProps) {
   const isCompact = props.variant === 'compact'
   const [sortKey, setSortKey] = useState<CompactSortKey>(null)
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc')
+  const viewportWidth = useViewportWidth()
+  const isMobileLayout = viewportWidth > 0 && viewportWidth <= 760
 
   const applySort = (nextKey: Exclude<CompactSortKey, null>) => {
     if (sortKey === nextKey) {
@@ -312,6 +358,308 @@ export function GamesOverviewTable(props: GamesOverviewTableProps) {
       showRank = true,
       onRowClick,
     } = props
+
+    if (isMobileLayout) {
+      const compactSortButtons = [
+        { key: 'game' as const, label: 'Game' },
+        { key: 'primary' as const, label: primaryLabel },
+        ...(secondaryLabel ? [{ key: 'secondary' as const, label: secondaryLabel }] : []),
+        ...(deltaLabel ? [{ key: 'delta' as const, label: deltaLabel }] : []),
+      ]
+
+      return (
+        <div
+          style={{
+            background: 'transparent',
+            border: `1px solid ${TOKENS.colors.surface3}`,
+            borderRadius: '24px',
+            overflow: 'hidden',
+          }}
+        >
+          <div
+            style={{
+              display: 'grid',
+              gap: '10px',
+              padding: '14px 16px',
+              borderBottom: `1px solid ${TOKENS.colors.surface3}`,
+              background: TOKENS.colors.surface2,
+            }}
+          >
+            <span
+              style={{
+                color: TOKENS.colors.neutral2,
+                fontSize: TOKENS.typography.body3.size,
+                lineHeight: TOKENS.typography.body3.lineHeight,
+                fontWeight: 600,
+              }}
+            >
+              Sort the board
+            </span>
+            <div
+              style={{
+                display: 'flex',
+                flexWrap: 'wrap',
+                gap: '8px',
+              }}
+            >
+              {compactSortButtons.map((button) => (
+                <MobileSortButton
+                  key={button.key}
+                  label={button.label}
+                  active={sortKey === button.key}
+                  direction={sortDirection}
+                  onClick={() => applySort(button.key)}
+                />
+              ))}
+            </div>
+          </div>
+
+          <div style={{ display: 'grid', gap: '8px', padding: '8px' }}>
+            {loading && rows.length === 0
+              ? Array.from({ length: skeletonRowCount }, (_, index) => (
+                  <div
+                    key={`compact-mobile-skeleton-${index}`}
+                    style={{
+                      display: 'grid',
+                      gap: '12px',
+                      padding: '16px',
+                      borderRadius: '18px',
+                      background: TOKENS.colors.surface2,
+                    }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: TOKENS.spacing.sm }}>
+                      <Skeleton width="26px" height="20px" radius="999px" />
+                      <Skeleton width="44px" height="44px" radius="12px" />
+                      <div style={{ display: 'grid', gap: '6px', minWidth: 0, flex: 1 }}>
+                        <Skeleton width="65%" height="20px" />
+                        <Skeleton width="42%" height="14px" />
+                      </div>
+                    </div>
+                    <div
+                      style={{
+                        display: 'grid',
+                        gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+                        gap: '10px 14px',
+                      }}
+                    >
+                      <Skeleton width="100%" height="44px" radius="14px" />
+                      <Skeleton width="100%" height="44px" radius="14px" />
+                      <Skeleton width="100%" height="44px" radius="14px" />
+                    </div>
+                  </div>
+                ))
+              : displayedCompactRows.map((row, index) => {
+                  const hoverKey = row.rank ?? index + 1
+                  const metricCount = [
+                    primaryLabel,
+                    secondaryLabel,
+                    deltaLabel,
+                  ].filter(Boolean).length
+
+                  return (
+                    <div
+                      key={row.universeId ?? `${row.name}-${row.studio}-${hoverKey}`}
+                      onMouseEnter={() => setHoveredRow(hoverKey)}
+                      onMouseLeave={() => setHoveredRow(null)}
+                      onClick={onRowClick ? () => onRowClick(row) : undefined}
+                      style={{
+                        display: 'grid',
+                        gap: '12px',
+                        padding: '16px',
+                        borderRadius: '18px',
+                        background:
+                          hoveredRow === hoverKey ? TOKENS.colors.surface2 : 'transparent',
+                        transition: `background ${TOKENS.transitions.fast}`,
+                        cursor: onRowClick ? 'pointer' : 'default',
+                      }}
+                    >
+                      <div
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: TOKENS.spacing.sm,
+                          minWidth: 0,
+                        }}
+                      >
+                        {showRank ? (
+                          <span
+                            style={{
+                              flexShrink: 0,
+                              minWidth: '28px',
+                              color: TOKENS.colors.neutral2,
+                              fontSize: TOKENS.typography.body3.size,
+                              lineHeight: TOKENS.typography.body3.lineHeight,
+                              fontWeight: 600,
+                            }}
+                          >
+                            #{row.rank ?? index + 1}
+                          </span>
+                        ) : null}
+                        <GameBadge
+                          label={row.name}
+                          size={44}
+                          imageUrl={row.thumbnailUrl}
+                          universeId={row.universeId}
+                        />
+                        <div style={{ display: 'grid', gap: '4px', minWidth: 0, flex: 1 }}>
+                          <span
+                            style={{
+                              color: TOKENS.colors.neutral1,
+                              fontSize: TOKENS.typography.body2.size,
+                              lineHeight: TOKENS.typography.body2.lineHeight,
+                              fontWeight: 600,
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                              whiteSpace: 'nowrap',
+                            }}
+                          >
+                            {row.name}
+                          </span>
+                          <span
+                            style={{
+                              color: TOKENS.colors.neutral2,
+                              fontSize: TOKENS.typography.body3.size,
+                              lineHeight: TOKENS.typography.body3.lineHeight,
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                              whiteSpace: 'nowrap',
+                            }}
+                          >
+                            {row.studio}
+                          </span>
+                        </div>
+                      </div>
+
+                      <div
+                        style={{
+                          display: 'grid',
+                          gridTemplateColumns:
+                            metricCount > 1 ? 'repeat(2, minmax(0, 1fr))' : '1fr',
+                          gap: '10px 12px',
+                        }}
+                      >
+                        <div
+                          style={{
+                            display: 'grid',
+                            gap: '4px',
+                            padding: '12px',
+                            borderRadius: '14px',
+                            background: TOKENS.colors.surface2,
+                          }}
+                        >
+                          <span
+                            style={{
+                              color: TOKENS.colors.neutral2,
+                              fontSize: TOKENS.typography.body3.size,
+                              lineHeight: TOKENS.typography.body3.lineHeight,
+                            }}
+                          >
+                            {primaryLabel}
+                          </span>
+                          <span
+                            style={{
+                              color: TOKENS.colors.neutral1,
+                              fontSize: TOKENS.typography.body2.size,
+                              lineHeight: TOKENS.typography.body2.lineHeight,
+                              fontWeight: 600,
+                            }}
+                          >
+                            {row.primaryValue}
+                          </span>
+                        </div>
+
+                        {secondaryLabel ? (
+                          <div
+                            style={{
+                              display: 'grid',
+                              gap: '4px',
+                              padding: '12px',
+                              borderRadius: '14px',
+                              background: TOKENS.colors.surface2,
+                            }}
+                          >
+                            <span
+                              style={{
+                                color: TOKENS.colors.neutral2,
+                                fontSize: TOKENS.typography.body3.size,
+                                lineHeight: TOKENS.typography.body3.lineHeight,
+                              }}
+                            >
+                              {secondaryLabel}
+                            </span>
+                            <span
+                              style={{
+                                color: TOKENS.colors.neutral1,
+                                fontSize: TOKENS.typography.body2.size,
+                                lineHeight: TOKENS.typography.body2.lineHeight,
+                                fontWeight: 600,
+                              }}
+                            >
+                              {row.secondaryValue}
+                            </span>
+                          </div>
+                        ) : null}
+
+                        {deltaLabel ? (
+                          <div
+                            style={{
+                              display: 'grid',
+                              gap: '4px',
+                              padding: '12px',
+                              borderRadius: '14px',
+                              background: TOKENS.colors.surface2,
+                            }}
+                          >
+                            <span
+                              style={{
+                                color: TOKENS.colors.neutral2,
+                                fontSize: TOKENS.typography.body3.size,
+                                lineHeight: TOKENS.typography.body3.lineHeight,
+                              }}
+                            >
+                              {deltaLabel}
+                            </span>
+                            {row.deltaValue !== undefined ? (
+                              <DeltaValue value={row.deltaValue} />
+                            ) : (
+                              <span style={{ color: TOKENS.colors.neutral1 }}>-</span>
+                            )}
+                          </div>
+                        ) : null}
+                      </div>
+
+                      {showTrend ? (
+                        <div
+                          style={{
+                            display: 'grid',
+                            gap: '6px',
+                            padding: '12px',
+                            borderRadius: '14px',
+                            background: TOKENS.colors.surface2,
+                          }}
+                        >
+                          <span
+                            style={{
+                              color: TOKENS.colors.neutral2,
+                              fontSize: TOKENS.typography.body3.size,
+                              lineHeight: TOKENS.typography.body3.lineHeight,
+                            }}
+                          >
+                            Trend
+                          </span>
+                          <MiniTrendChart
+                            points={row.trend ?? []}
+                            tone={row.chartTone ?? 'neutral'}
+                          />
+                        </div>
+                      ) : null}
+                    </div>
+                  )
+                })}
+          </div>
+        </div>
+      )
+    }
 
     return (
       <div
@@ -557,6 +905,215 @@ export function GamesOverviewTable(props: GamesOverviewTableProps) {
     skeletonRowCount = 8,
     onRowClick,
   } = props
+
+  if (isMobileLayout) {
+    return (
+      <div
+        style={{
+          background: 'transparent',
+          border: `1px solid ${TOKENS.colors.surface3}`,
+          borderRadius: '28px',
+          overflow: 'hidden',
+        }}
+      >
+        <div
+          style={{
+            padding: '14px 16px',
+            borderBottom: `1px solid ${TOKENS.colors.surface3}`,
+            background: TOKENS.colors.surface2,
+            color: TOKENS.colors.neutral2,
+            fontSize: TOKENS.typography.body3.size,
+            lineHeight: TOKENS.typography.body3.lineHeight,
+            fontWeight: 600,
+          }}
+        >
+          Top games snapshot
+        </div>
+
+        <div style={{ display: 'grid', gap: '8px', padding: '8px' }}>
+          {loading && rows.length === 0
+            ? Array.from({ length: skeletonRowCount }, (_, index) => (
+                <div
+                  key={`full-mobile-skeleton-${index}`}
+                  style={{
+                    display: 'grid',
+                    gap: '12px',
+                    padding: '16px',
+                    borderRadius: '18px',
+                    background: TOKENS.colors.surface2,
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: TOKENS.spacing.sm }}>
+                    <Skeleton width="24px" height="20px" radius="999px" />
+                    <Skeleton width="48px" height="48px" radius="12px" />
+                    <div style={{ display: 'grid', gap: '6px', minWidth: 0, flex: 1 }}>
+                      <Skeleton width="60%" height="20px" />
+                      <Skeleton width="36%" height="14px" />
+                    </div>
+                  </div>
+                  <div
+                    style={{
+                      display: 'grid',
+                      gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+                      gap: '10px 12px',
+                    }}
+                  >
+                    {Array.from({ length: 5 }, (_, metricIndex) => (
+                      <Skeleton
+                        key={`full-mobile-metric-${index}-${metricIndex}`}
+                        width="100%"
+                        height="44px"
+                        radius="14px"
+                      />
+                    ))}
+                  </div>
+                </div>
+              ))
+            : rows.map((row) => (
+                <div
+                  key={row.universeId ?? `${row.rank}-${row.name}`}
+                  onMouseEnter={() => setHoveredRow(row.rank)}
+                  onMouseLeave={() => setHoveredRow(null)}
+                  onClick={onRowClick ? () => onRowClick(row) : undefined}
+                  style={{
+                    display: 'grid',
+                    gap: '12px',
+                    padding: '16px',
+                    borderRadius: '18px',
+                    background:
+                      hoveredRow === row.rank ? TOKENS.colors.surface2 : 'transparent',
+                    transition: `background ${TOKENS.transitions.fast}`,
+                    cursor: onRowClick ? 'pointer' : 'default',
+                  }}
+                >
+                  <div
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: TOKENS.spacing.sm,
+                      minWidth: 0,
+                    }}
+                  >
+                    <span
+                      style={{
+                        flexShrink: 0,
+                        minWidth: '28px',
+                        color: TOKENS.colors.neutral2,
+                        fontSize: TOKENS.typography.body3.size,
+                        lineHeight: TOKENS.typography.body3.lineHeight,
+                        fontWeight: 600,
+                      }}
+                    >
+                      #{row.rank}
+                    </span>
+                    <GameBadge
+                      label={row.name}
+                      size={44}
+                      imageUrl={row.thumbnailUrl}
+                      universeId={row.universeId}
+                    />
+                    <div style={{ display: 'grid', gap: '4px', minWidth: 0, flex: 1 }}>
+                      <span
+                        style={{
+                          color: TOKENS.colors.neutral1,
+                          fontSize: TOKENS.typography.body2.size,
+                          lineHeight: TOKENS.typography.body2.lineHeight,
+                          fontWeight: 600,
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        {row.name}
+                      </span>
+                      <span
+                        style={{
+                          color: TOKENS.colors.neutral2,
+                          fontSize: TOKENS.typography.body3.size,
+                          lineHeight: TOKENS.typography.body3.lineHeight,
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        {row.studio}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div
+                    style={{
+                      display: 'grid',
+                      gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+                      gap: '10px 12px',
+                    }}
+                  >
+                    {[
+                      { label: 'Players', value: row.playersLabel },
+                      { label: '1H', value: <DeltaValue value={row.change1h} /> },
+                      { label: '24H', value: <DeltaValue value={row.change24h} /> },
+                      { label: 'Rating', value: row.ratingLabel },
+                      { label: 'Visits', value: row.visitsLabel },
+                    ].map((metric) => (
+                      <div
+                        key={metric.label}
+                        style={{
+                          display: 'grid',
+                          gap: '4px',
+                          padding: '12px',
+                          borderRadius: '14px',
+                          background: TOKENS.colors.surface2,
+                        }}
+                      >
+                        <span
+                          style={{
+                            color: TOKENS.colors.neutral2,
+                            fontSize: TOKENS.typography.body3.size,
+                            lineHeight: TOKENS.typography.body3.lineHeight,
+                          }}
+                        >
+                          {metric.label}
+                        </span>
+                        <span
+                          style={{
+                            color: TOKENS.colors.neutral1,
+                            fontSize: TOKENS.typography.body2.size,
+                            lineHeight: TOKENS.typography.body2.lineHeight,
+                            fontWeight: 600,
+                          }}
+                        >
+                          {metric.value}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div
+                    style={{
+                      display: 'grid',
+                      gap: '6px',
+                      padding: '12px',
+                      borderRadius: '14px',
+                      background: TOKENS.colors.surface2,
+                    }}
+                  >
+                    <span
+                      style={{
+                        color: TOKENS.colors.neutral2,
+                        fontSize: TOKENS.typography.body3.size,
+                        lineHeight: TOKENS.typography.body3.lineHeight,
+                      }}
+                    >
+                      Trend
+                    </span>
+                    <MiniTrendChart points={row.trend} tone={row.chartTone} />
+                  </div>
+                </div>
+              ))}
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div

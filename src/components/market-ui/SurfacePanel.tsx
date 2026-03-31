@@ -40,6 +40,7 @@ export function SurfacePanel({
             display: 'flex',
             alignItems: 'flex-start',
             justifyContent: 'space-between',
+            flexWrap: 'wrap',
             gap: TOKENS.spacing.md,
           }}
         >

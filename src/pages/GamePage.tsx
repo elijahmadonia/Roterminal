@@ -1,4 +1,4 @@
-import { type ReactNode, useEffect, useState } from 'react'
+import { createContext, type ReactNode, useContext, useEffect, useState } from 'react'
 import { Check } from 'lucide-react'
 import { ExternalLink } from 'lucide-react'
 
@@ -28,6 +28,7 @@ import {
 } from '../components/ui/AnimatedNumber'
 import { TOKENS } from '../design/marketTokens'
 import { useLiveBoard } from '../hooks/useLiveBoard'
+import { useViewportWidth } from '../hooks/useViewportWidth'
 import { useRollingLiveline } from '../hooks/useRollingLiveline'
 import { generateGameShareCard } from '../utils/shareCard'
 import {
@@ -77,6 +78,8 @@ const SHARE_VARIANT_OPTIONS = [
   },
 ] as const
 
+const GamePageCompactContext = createContext(false)
+
 function toLiveLineData(points: TrendPoint[]) {
   const fallbackStart = Math.floor(Date.now() / 1000) - points.length * 300
 
@@ -117,12 +120,24 @@ function formatDurationCompact(totalSeconds: number) {
   return `${hours}h ${minutes}m`
 }
 
-function StatRow({ label, value }: { label: string; value: ReactNode }) {
+function StatRow({
+  label,
+  value,
+  stacked = false,
+}: {
+  label: string
+  value: ReactNode
+  stacked?: boolean
+}) {
+  const compactLayout = useContext(GamePageCompactContext)
+  const shouldStack = stacked || compactLayout
+
   return (
     <div
       style={{
         display: 'flex',
-        alignItems: 'baseline',
+        flexDirection: shouldStack ? 'column' : 'row',
+        alignItems: shouldStack ? 'flex-start' : 'baseline',
         justifyContent: 'space-between',
         gap: TOKENS.spacing.md,
       }}
@@ -142,9 +157,12 @@ function StatRow({ label, value }: { label: string; value: ReactNode }) {
           fontSize: TOKENS.typography.body1.size,
           lineHeight: TOKENS.typography.body1.lineHeight,
           fontWeight: 500,
-          textAlign: 'right',
+          textAlign: shouldStack ? 'left' : 'right',
           display: 'inline-flex',
-          justifyContent: 'flex-end',
+          justifyContent: shouldStack ? 'flex-start' : 'flex-end',
+          maxWidth: '100%',
+          whiteSpace: shouldStack ? 'normal' : undefined,
+          wordBreak: 'break-word',
         }}
       >
         {value}
@@ -182,8 +200,10 @@ function SkeletonStatRows({ rows = 4 }: { rows?: number }) {
   )
 }
 
-function PairedMetricBoxSkeleton() {
+function PairedMetricBoxSkeleton({ stacked = false }: { stacked?: boolean }) {
   const itemWidths = ['96px', '112px', '88px', '120px']
+  const compactLayout = useContext(GamePageCompactContext)
+  const shouldStack = stacked || compactLayout
 
   return (
     <div
@@ -197,7 +217,7 @@ function PairedMetricBoxSkeleton() {
       <div
         style={{
           display: 'grid',
-          gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+          gridTemplateColumns: shouldStack ? '1fr' : 'repeat(2, minmax(0, 1fr))',
         }}
       >
         {itemWidths.map((width, index) => (
@@ -207,8 +227,16 @@ function PairedMetricBoxSkeleton() {
               display: 'grid',
               gap: TOKENS.spacing.xs,
               padding: TOKENS.spacing.lg,
-              borderLeft: index % 2 === 1 ? `1px solid ${TOKENS.colors.surface3}` : 'none',
-              borderTop: index > 1 ? `1px solid ${TOKENS.colors.surface3}` : 'none',
+              borderLeft:
+                !shouldStack && index % 2 === 1 ? `1px solid ${TOKENS.colors.surface3}` : 'none',
+              borderTop:
+                shouldStack
+                  ? index > 0
+                    ? `1px solid ${TOKENS.colors.surface3}`
+                    : 'none'
+                  : index > 1
+                    ? `1px solid ${TOKENS.colors.surface3}`
+                    : 'none',
             }}
           >
             <Skeleton width={width} height="18px" radius={TOKENS.radii.sm} />
@@ -239,7 +267,10 @@ function EstimatedValueSkeleton() {
   )
 }
 
-function StatsPanelSkeleton() {
+function StatsPanelSkeleton({ stacked = false }: { stacked?: boolean }) {
+  const compactLayout = useContext(GamePageCompactContext)
+  const shouldStack = stacked || compactLayout
+
   return (
     <SurfacePanel style={{ gap: TOKENS.spacing.lg, border: 'none' }}>
       <div style={{ display: 'grid', gap: TOKENS.spacing.lg }}>
@@ -249,7 +280,7 @@ function StatsPanelSkeleton() {
             <div
               style={{
                 display: 'grid',
-                gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+                gridTemplateColumns: shouldStack ? '1fr' : 'repeat(2, minmax(0, 1fr))',
                 gap: TOKENS.spacing.md,
               }}
             >
@@ -537,22 +568,26 @@ function SplitStatBar({
   rightLabel,
   rightValue,
   leftShare,
+  stacked = false,
 }: {
   leftLabel: string
   leftValue: ReactNode
   rightLabel: string
   rightValue: ReactNode
   leftShare: number
+  stacked?: boolean
 }) {
   const normalizedLeftShare =
     Number.isFinite(leftShare) && leftShare > 0 && leftShare < 1 ? leftShare : leftShare >= 1 ? 1 : 0
+  const compactLayout = useContext(GamePageCompactContext)
+  const shouldStack = stacked || compactLayout
 
   return (
     <div style={{ display: 'grid', gap: TOKENS.spacing.sm }}>
       <div
         style={{
           display: 'grid',
-          gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+          gridTemplateColumns: shouldStack ? '1fr' : 'repeat(2, minmax(0, 1fr))',
           gap: TOKENS.spacing.md,
         }}
       >
@@ -635,14 +670,19 @@ function SplitStatBar({
 
 function PairedMetricBox({
   items,
+  stacked = false,
 }: {
   items: Array<{ label: string; value: ReactNode }>
+  stacked?: boolean
 }) {
+  const compactLayout = useContext(GamePageCompactContext)
+  const shouldStack = stacked || compactLayout
+
   return (
     <div
       style={{
         display: 'grid',
-        gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+        gridTemplateColumns: shouldStack ? '1fr' : 'repeat(2, minmax(0, 1fr))',
       }}
     >
       {items.map((item, index) => (
@@ -652,8 +692,16 @@ function PairedMetricBox({
             display: 'grid',
             gap: TOKENS.spacing.xs,
             padding: TOKENS.spacing.lg,
-            borderLeft: index % 2 === 1 ? `1px solid ${TOKENS.colors.surface3}` : 'none',
-            borderTop: index > 1 ? `1px solid ${TOKENS.colors.surface3}` : 'none',
+            borderLeft:
+              !shouldStack && index % 2 === 1 ? `1px solid ${TOKENS.colors.surface3}` : 'none',
+            borderTop:
+              shouldStack
+                ? index > 0
+                  ? `1px solid ${TOKENS.colors.surface3}`
+                  : 'none'
+                : index > 1
+                  ? `1px solid ${TOKENS.colors.surface3}`
+                  : 'none',
           }}
         >
           <div
@@ -795,6 +843,8 @@ function InventoryPreview({
   title: string
   items: DetailInventoryItem[]
 }) {
+  const compactLayout = useContext(GamePageCompactContext)
+
   return (
     <div style={{ display: 'grid', gap: TOKENS.spacing.xs }}>
       <div
@@ -824,7 +874,8 @@ function InventoryPreview({
             key={`${item.id ?? index}-${item.name}`}
             style={{
               display: 'flex',
-              alignItems: 'center',
+              flexDirection: compactLayout ? 'column' : 'row',
+              alignItems: compactLayout ? 'flex-start' : 'center',
               justifyContent: 'space-between',
               gap: TOKENS.spacing.md,
             }}
@@ -844,7 +895,7 @@ function InventoryPreview({
                 color: TOKENS.colors.neutral2,
                 fontSize: TOKENS.typography.body3.size,
                 lineHeight: TOKENS.typography.body3.lineHeight,
-                whiteSpace: 'nowrap',
+                whiteSpace: compactLayout ? 'normal' : 'nowrap',
               }}
             >
               {item.price == null ? 'No price' : renderRobux(item.price)}
@@ -920,13 +971,16 @@ function HeatmapPreview({
   }>
 }) {
   const maxValue = Math.max(...items.map((item) => item.averageCCU), 1)
+  const compactLayout = useContext(GamePageCompactContext)
 
   return (
     <div style={{ display: 'grid', gap: TOKENS.spacing.sm }}>
       <div
         style={{
           display: 'grid',
-          gridTemplateColumns: 'repeat(6, minmax(0, 1fr))',
+          gridTemplateColumns: compactLayout
+            ? 'repeat(3, minmax(0, 1fr))'
+            : 'repeat(6, minmax(0, 1fr))',
           gap: TOKENS.spacing.xs,
         }}
       >
@@ -982,6 +1036,8 @@ function HeatmapPreview({
 }
 
 function ComparablePreview({ games }: { games: DetailComparableGame[] }) {
+  const compactLayout = useContext(GamePageCompactContext)
+
   if (games.length === 0) {
     return (
       <div
@@ -1011,7 +1067,8 @@ function ComparablePreview({ games }: { games: DetailComparableGame[] }) {
           <div
             style={{
               display: 'flex',
-              alignItems: 'baseline',
+              flexDirection: compactLayout ? 'column' : 'row',
+              alignItems: compactLayout ? 'flex-start' : 'baseline',
               justifyContent: 'space-between',
               gap: TOKENS.spacing.md,
             }}
@@ -1032,7 +1089,7 @@ function ComparablePreview({ games }: { games: DetailComparableGame[] }) {
                 color: TOKENS.colors.neutral2,
                 fontSize: TOKENS.typography.body3.size,
                 lineHeight: TOKENS.typography.body3.lineHeight,
-                whiteSpace: 'nowrap',
+                whiteSpace: compactLayout ? 'normal' : 'nowrap',
               }}
             >
               Score <AnimatedNumber value={entry.similarityScore} format={{ minimumFractionDigits: 1, maximumFractionDigits: 1 }} />
@@ -1083,6 +1140,8 @@ export default function GamePage({
   const [inlineSharePreviewUrl, setInlineSharePreviewUrl] = useState<string | null>(null)
   const [sharePreviewUrl, setSharePreviewUrl] = useState<string | null>(null)
   const [sharePreviewFile, setSharePreviewFile] = useState<File | null>(null)
+  const viewportWidth = useViewportWidth()
+  const isMobile = viewportWidth > 0 && viewportWidth <= 640
   const activeThumbnailUrl =
     gameDetail?.game.universeId != null && thumbnailRetryNonce > 0
       ? `/api/game-icon/${gameDetail.game.universeId}?refresh=${thumbnailRetryNonce}`
@@ -1243,23 +1302,24 @@ export default function GamePage({
 
   if (isLoading) {
     return (
-      <div
-        style={{
-          minHeight: '100vh',
-          background: TOKENS.colors.surface1,
-          color: TOKENS.colors.neutral1,
-          fontFamily: TOKENS.typography.fontFamily,
-        }}
-      >
-        <main
+      <GamePageCompactContext.Provider value={isMobile}>
+        <div
           style={{
-            maxWidth: '1100px',
-            margin: '0 auto',
-            padding: '32px 28px 72px',
-            display: 'grid',
-            gap: TOKENS.spacing.xxl,
+            minHeight: '100vh',
+            background: TOKENS.colors.surface1,
+            color: TOKENS.colors.neutral1,
+            fontFamily: TOKENS.typography.fontFamily,
           }}
         >
+          <main
+            style={{
+              maxWidth: '1100px',
+              margin: '0 auto',
+              padding: '32px 28px 72px',
+              display: 'grid',
+              gap: TOKENS.spacing.xxl,
+            }}
+          >
           <section
             style={{
               display: 'grid',
@@ -1269,8 +1329,9 @@ export default function GamePage({
             <div
               style={{
                 display: 'flex',
-                alignItems: 'center',
+                alignItems: isMobile ? 'flex-start' : 'center',
                 justifyContent: 'space-between',
+                flexWrap: 'wrap',
                 gap: TOKENS.spacing.lg,
                 paddingBottom: TOKENS.spacing.xl,
                 borderBottom: `1px solid ${TOKENS.colors.surface3}`,
@@ -1319,14 +1380,14 @@ export default function GamePage({
                     />
                   }
                 />
-                <PairedMetricBoxSkeleton />
+                <PairedMetricBoxSkeleton stacked={isMobile} />
               </div>
 
               <div style={{ display: 'grid', gap: TOKENS.spacing.lg }}>
                 <div
                   style={{
                     display: 'grid',
-                    gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+                    gridTemplateColumns: isMobile ? '1fr' : 'repeat(2, minmax(0, 1fr))',
                     gap: TOKENS.spacing.md,
                   }}
                 >
@@ -1334,7 +1395,7 @@ export default function GamePage({
                   <Skeleton width="100%" height="45px" radius={TOKENS.radii.lg} />
                 </div>
                 <EstimatedValueSkeleton />
-                <StatsPanelSkeleton />
+                <StatsPanelSkeleton stacked={isMobile} />
               </div>
             </section>
           </section>
@@ -1365,43 +1426,46 @@ export default function GamePage({
             <RawDataCardSkeleton rows={5} note />
             <RawDataCardSkeleton rows={5} note />
           </section>
-        </main>
-      </div>
+          </main>
+        </div>
+      </GamePageCompactContext.Provider>
     )
   }
 
   if (error || !gameDetail) {
     return (
-      <div
-        style={{
-          minHeight: '100vh',
-          background: TOKENS.colors.surface1,
-          color: TOKENS.colors.neutral1,
-          fontFamily: TOKENS.typography.fontFamily,
-        }}
-      >
-        <main
+      <GamePageCompactContext.Provider value={isMobile}>
+        <div
           style={{
-            maxWidth: '1100px',
-            margin: '0 auto',
-            padding: '32px 28px 72px',
-            display: 'grid',
-            gap: TOKENS.spacing.lg,
+            minHeight: '100vh',
+            background: TOKENS.colors.surface1,
+            color: TOKENS.colors.neutral1,
+            fontFamily: TOKENS.typography.fontFamily,
           }}
         >
-          <SurfacePanel title="Unable to load game">
-            <div
-              style={{
-                color: TOKENS.colors.neutral2,
-                fontSize: TOKENS.typography.body2.size,
-                lineHeight: TOKENS.typography.body2.lineHeight,
-              }}
-            >
-              {error ?? 'Unknown error'}
-            </div>
-          </SurfacePanel>
-        </main>
-      </div>
+          <main
+            style={{
+              maxWidth: '1100px',
+              margin: '0 auto',
+              padding: '32px 28px 72px',
+              display: 'grid',
+              gap: TOKENS.spacing.lg,
+            }}
+          >
+            <SurfacePanel title="Unable to load game">
+              <div
+                style={{
+                  color: TOKENS.colors.neutral2,
+                  fontSize: TOKENS.typography.body2.size,
+                  lineHeight: TOKENS.typography.body2.lineHeight,
+                }}
+              >
+                {error ?? 'Unknown error'}
+              </div>
+            </SurfacePanel>
+          </main>
+        </div>
+      </GamePageCompactContext.Provider>
     )
   }
 
@@ -1637,23 +1701,24 @@ export default function GamePage({
     }
   }
   return (
-    <div
-      style={{
-        minHeight: '100vh',
-        background: TOKENS.colors.surface1,
-        color: TOKENS.colors.neutral1,
-        fontFamily: TOKENS.typography.fontFamily,
-      }}
-    >
-      <main
+    <GamePageCompactContext.Provider value={isMobile}>
+      <div
         style={{
-          maxWidth: '1100px',
-          margin: '0 auto',
-          padding: '32px 28px 72px',
-          display: 'grid',
-          gap: TOKENS.spacing.xxl,
+          minHeight: '100vh',
+          background: TOKENS.colors.surface1,
+          color: TOKENS.colors.neutral1,
+          fontFamily: TOKENS.typography.fontFamily,
         }}
       >
+        <main
+          style={{
+            maxWidth: '1100px',
+            margin: '0 auto',
+            padding: '32px 28px 72px',
+            display: 'grid',
+            gap: TOKENS.spacing.xxl,
+          }}
+        >
         <section
           style={{
             display: 'grid',
@@ -1663,8 +1728,9 @@ export default function GamePage({
           <div
             style={{
               display: 'flex',
-              alignItems: 'center',
+              alignItems: isMobile ? 'flex-start' : 'center',
               justifyContent: 'space-between',
+              flexWrap: 'wrap',
               gap: TOKENS.spacing.lg,
               paddingBottom: TOKENS.spacing.xl,
               borderBottom: `1px solid ${TOKENS.colors.surface3}`,
@@ -1823,6 +1889,7 @@ export default function GamePage({
                           : <><WholeNumber value={dataSections.players.averageSessionLengthMinutes} /> min</>,
                     },
                   ]}
+                  stacked={isMobile}
                 />
               </div>
             </div>
@@ -1831,7 +1898,7 @@ export default function GamePage({
               <div
                 style={{
                   display: 'grid',
-                  gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
+                  gridTemplateColumns: isMobile ? '1fr' : 'repeat(2, minmax(0, 1fr))',
                   gap: TOKENS.spacing.md,
                 }}
               >
@@ -2018,6 +2085,7 @@ export default function GamePage({
                     rightLabel="Dislikes"
                     rightValue={<CompactNumber value={normalizedGame.downVotes} />}
                     leftShare={upvoteShare}
+                    stacked={isMobile}
                   />
 
                   <div style={{ display: 'grid', gap: TOKENS.spacing.xl }}>
@@ -2647,7 +2715,8 @@ export default function GamePage({
                     key={server.id}
                     style={{
                       display: 'flex',
-                      alignItems: 'center',
+                      flexDirection: isMobile ? 'column' : 'row',
+                      alignItems: isMobile ? 'flex-start' : 'center',
                       justifyContent: 'space-between',
                       gap: TOKENS.spacing.md,
                     }}
@@ -2666,7 +2735,7 @@ export default function GamePage({
                         color: TOKENS.colors.neutral2,
                         fontSize: TOKENS.typography.body3.size,
                         lineHeight: TOKENS.typography.body3.lineHeight,
-                        whiteSpace: 'nowrap',
+                        whiteSpace: isMobile ? 'normal' : 'nowrap',
                       }}
                     >
                       {server.ping == null ? 'Ping n/a' : <><WholeNumber value={server.ping} /> ms</>} ·{' '}
@@ -2678,10 +2747,10 @@ export default function GamePage({
             </div>
           </SurfacePanel>
         </section>
-      </main>
+        </main>
 
-      {sharePreviewUrl ? (
-        <div
+        {sharePreviewUrl ? (
+          <div
           role="dialog"
           aria-modal="true"
           aria-label="Share image preview"
@@ -2708,8 +2777,9 @@ export default function GamePage({
             <div
               style={{
                 display: 'flex',
-                alignItems: 'center',
+                alignItems: isMobile ? 'flex-start' : 'center',
                 justifyContent: 'space-between',
+                flexWrap: 'wrap',
                 gap: TOKENS.spacing.md,
                 width: '100%',
               }}
@@ -2739,16 +2809,24 @@ export default function GamePage({
               <div
                 style={{
                   display: 'flex',
-                  alignItems: 'center',
+                  alignItems: isMobile ? 'stretch' : 'center',
+                  flexDirection: isMobile ? 'column' : 'row',
                   gap: TOKENS.spacing.sm,
+                  width: isMobile ? '100%' : undefined,
                 }}
               >
-                <MarketButton type="button" variant="secondary" onClick={handleSharePreview}>
+                <MarketButton
+                  type="button"
+                  variant="secondary"
+                  style={{ width: isMobile ? '100%' : undefined }}
+                  onClick={handleSharePreview}
+                >
                   Share image
                 </MarketButton>
                 <MarketButton
                   type="button"
                   variant="secondary"
+                  style={{ width: isMobile ? '100%' : undefined }}
                   onClick={() => {
                     if (!sharePreviewUrl || !sharePreviewFile) {
                       return
@@ -2764,7 +2842,12 @@ export default function GamePage({
                 >
                   Download PNG
                 </MarketButton>
-                <MarketButton type="button" variant="outline" onClick={closeSharePreview}>
+                <MarketButton
+                  type="button"
+                  variant="outline"
+                  style={{ width: isMobile ? '100%' : undefined }}
+                  onClick={closeSharePreview}
+                >
                   Close
                 </MarketButton>
               </div>
@@ -2788,18 +2871,19 @@ export default function GamePage({
                 alt={`${game.name} share preview`}
                 style={{
                   display: 'block',
-                  width: 'min(70vw, 520px)',
+                  width: isMobile ? 'min(82vw, 360px)' : 'min(70vw, 520px)',
                   maxWidth: '100%',
                   maxHeight: '72vh',
-                  height: 'min(70vw, 520px)',
+                  height: isMobile ? 'min(82vw, 360px)' : 'min(70vw, 520px)',
                   borderRadius: TOKENS.radii.xxl,
                   objectFit: 'contain',
                 }}
               />
             </div>
           </div>
-        </div>
-      ) : null}
-    </div>
+          </div>
+        ) : null}
+      </div>
+    </GamePageCompactContext.Provider>
   )
 }

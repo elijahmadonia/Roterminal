@@ -415,7 +415,9 @@ export function CategoryPerformanceMap({
   onItemClick,
 }: CategoryPerformanceMapProps) {
   const { ref, width } = useElementWidth<HTMLDivElement>()
-  const height = clamp(width * 0.58, 420, 720)
+  const height = width > 0 && width <= 640
+    ? clamp(width * 1.02, 340, 520)
+    : clamp(width * 0.58, 420, 720)
 
   const sectionLayouts = useMemo<SectionLayout[]>(() => {
     if (width <= 0 || sections.length === 0) return []

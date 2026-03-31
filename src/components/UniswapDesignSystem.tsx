@@ -28,6 +28,7 @@ import {
   trendingGames,
 } from '../data/homeOverview'
 import { NETWORKS, TIME_PERIODS, TOKENS, TYPOGRAPHY_SPECS } from '../design/marketTokens'
+import { useViewportWidth } from '../hooks/useViewportWidth'
 
 type Token = {
   rank: number
@@ -594,6 +595,55 @@ function MarketStatStrip({ tokens }: { tokens: Token[] }) {
     { label: 'v3 TVL', value: '$1.02B', change: '11.00% today', tone: 'negative' as const },
     { label: 'v4 TVL', value: '$562.96M', change: '9.06% today', tone: 'negative' as const },
   ]
+  const viewportWidth = useViewportWidth()
+  const isCompactLayout = viewportWidth > 0 && viewportWidth <= 760
+
+  if (isCompactLayout) {
+    return (
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns:
+            viewportWidth > 0 && viewportWidth <= 520
+              ? '1fr'
+              : 'repeat(2, minmax(0, 1fr))',
+          gap: TOKENS.spacing.sm,
+        }}
+      >
+        {metrics.map((metric) => (
+          <div
+            key={metric.label}
+            style={{
+              display: 'grid',
+              gap: '6px',
+              minHeight: '92px',
+              padding: TOKENS.spacing.md,
+              borderRadius: TOKENS.radii.xl,
+              background: TOKENS.colors.surface2,
+              border: `1px solid ${TOKENS.colors.neutral4}33`,
+            }}
+          >
+            <span style={{ color: TOKENS.colors.neutral2, fontSize: TOKENS.typography.body3.size }}>{metric.label}</span>
+            <strong style={{ fontSize: '18px', lineHeight: '24px', fontWeight: 500 }}>{metric.value}</strong>
+            <span
+              style={{
+                color: metric.tone === 'positive' ? TOKENS.colors.success : TOKENS.colors.critical,
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '4px',
+                fontSize: TOKENS.typography.body3.size,
+                fontWeight: 600,
+              }}
+            >
+              {metric.tone === 'positive' ? <TrendingUp size={12} /> : <TrendingDown size={12} />}
+              {metric.change}
+            </span>
+          </div>
+        ))}
+        <div style={{ display: 'none' }}>{tokens.length}</div>
+      </div>
+    )
+  }
 
   return (
     <div
@@ -687,6 +737,142 @@ function TokenTable({
   hoveredRow: number | null
   setHoveredRow: (value: number | null) => void
 }) {
+  const viewportWidth = useViewportWidth()
+  const isMobileLayout = viewportWidth > 0 && viewportWidth <= 760
+
+  if (isMobileLayout) {
+    return (
+      <Surface padding="0">
+        <div
+          style={{
+            padding: '14px 16px',
+            borderBottom: `1px solid ${TOKENS.colors.neutral4}33`,
+            color: TOKENS.colors.neutral2,
+            fontSize: TOKENS.typography.body3.size,
+            fontWeight: 600,
+          }}
+        >
+          Token board
+        </div>
+
+        <div style={{ display: 'grid', gap: '8px', padding: '10px' }}>
+          {rows.map((token) => {
+            const positive = token.change1d >= 0
+            const rowActive = hoveredRow === token.rank || token.highlight
+
+            return (
+              <div
+                key={`${token.rank}-${token.name}-${token.symbol}`}
+                onMouseEnter={() => setHoveredRow(token.rank)}
+                onMouseLeave={() => setHoveredRow(null)}
+                style={{
+                  display: 'grid',
+                  gap: '12px',
+                  padding: '16px',
+                  borderRadius: '20px',
+                  background: rowActive ? '#1A1A1A' : 'transparent',
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: TOKENS.spacing.sm, minWidth: 0 }}>
+                  <span
+                    style={{
+                      minWidth: '28px',
+                      color: TOKENS.colors.neutral2,
+                      fontSize: TOKENS.typography.body3.size,
+                      fontWeight: 600,
+                    }}
+                  >
+                    #{token.rank}
+                  </span>
+                  <div style={{ position: 'relative', width: '44px', height: '44px', flexShrink: 0 }}>
+                    <TokenLogo symbol={token.symbol} color={token.color} size={44} />
+                    {token.badgeColor ? (
+                      <span
+                        style={{
+                          position: 'absolute',
+                          right: '-2px',
+                          bottom: '-2px',
+                          width: '16px',
+                          height: '16px',
+                          borderRadius: '6px',
+                          background: token.badgeColor,
+                          border: `2px solid ${TOKENS.colors.surface1}`,
+                        }}
+                      />
+                    ) : null}
+                  </div>
+                  <div style={{ display: 'grid', gap: '4px', minWidth: 0, flex: 1 }}>
+                    <span style={{ fontSize: TOKENS.typography.body1.size, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {token.name}
+                    </span>
+                    <span style={{ color: TOKENS.colors.neutral2, fontSize: TOKENS.typography.body3.size }}>
+                      {token.symbol}
+                    </span>
+                  </div>
+                </div>
+
+                <div
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns:
+                      viewportWidth > 0 && viewportWidth <= 520
+                        ? '1fr'
+                        : 'repeat(2, minmax(0, 1fr))',
+                    gap: '10px 12px',
+                  }}
+                >
+                  {[
+                    { label: 'Price', value: token.priceLabel ?? formatPrice(token.price) },
+                    { label: '1H', value: <DeltaValue value={token.change1h} /> },
+                    { label: '1D', value: <DeltaValue value={token.change1d} /> },
+                    { label: 'FDV', value: token.fdvLabel ?? formatCompact(token.fdv) },
+                    { label: 'Volume', value: token.volumeLabel ?? formatCompact(token.volume) },
+                  ].map((metric) => (
+                    <div
+                      key={`${token.rank}-${metric.label}`}
+                      style={{
+                        display: 'grid',
+                        gap: '4px',
+                        padding: '12px',
+                        borderRadius: '14px',
+                        background: TOKENS.colors.surface2,
+                      }}
+                    >
+                      <span style={{ color: TOKENS.colors.neutral2, fontSize: TOKENS.typography.body3.size }}>
+                        {metric.label}
+                      </span>
+                      <span style={{ color: TOKENS.colors.neutral1, fontSize: TOKENS.typography.body2.size, fontWeight: 600 }}>
+                        {metric.value}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+
+                <div
+                  style={{
+                    display: 'grid',
+                    gap: '6px',
+                    padding: '12px',
+                    borderRadius: '14px',
+                    background: TOKENS.colors.surface2,
+                  }}
+                >
+                  <span style={{ color: TOKENS.colors.neutral2, fontSize: TOKENS.typography.body3.size }}>
+                    1D chart
+                  </span>
+                  <MiniTrendChart
+                    points={token.sparkline}
+                    tone={positive ? 'positive' : 'negative'}
+                  />
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      </Surface>
+    )
+  }
+
   return (
     <Surface padding="0">
       <div
@@ -857,6 +1043,9 @@ export default function UniswapDesignSystem() {
   const [sortBy, setSortBy] = useState<SortField>('volume')
   const [sortDir, setSortDir] = useState<SortDirection>('desc')
   const [hoveredRow, setHoveredRow] = useState<number | null>(null)
+  const viewportWidth = useViewportWidth()
+  const isTablet = viewportWidth > 0 && viewportWidth <= 980
+  const isMobile = viewportWidth > 0 && viewportWidth <= 640
   const filteredTokens = useMemo(() => {
     const normalized = query.trim().toLowerCase()
 
@@ -1035,15 +1224,15 @@ export default function UniswapDesignSystem() {
         ::selection { background: ${TOKENS.colors.accent1}33; }
       `}</style>
 
-      <main style={{ maxWidth: '1100px', margin: '0 auto', padding: '32px 16px 80px' }}>
+      <main style={{ maxWidth: '1100px', margin: '0 auto', padding: isMobile ? '24px 16px 80px' : '32px 16px 80px' }}>
         <div style={{ display: 'grid', gap: TOKENS.spacing.xl }}>
           <Section
             title="Foundations"
             subtitle="The shared constants that the higher-level components should bind to."
           >
-            <div style={{ display: 'grid', gridTemplateColumns: '1.1fr 1fr', gap: TOKENS.spacing.lg }}>
+            <div style={{ display: 'grid', gridTemplateColumns: isTablet ? '1fr' : '1.1fr 1fr', gap: TOKENS.spacing.lg }}>
               <SubSection title="Colors">
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: TOKENS.spacing.md }}>
+                <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : isTablet ? 'repeat(2, minmax(0, 1fr))' : 'repeat(3, minmax(0, 1fr))', gap: TOKENS.spacing.md }}>
                   <ColorSwatch name="accent1" value={TOKENS.colors.accent1} />
                   <ColorSwatch name="surface1" value={TOKENS.colors.surface1} border />
                   <ColorSwatch name="surface2" value={TOKENS.colors.surface2} border />
@@ -1076,7 +1265,7 @@ export default function UniswapDesignSystem() {
                   style={{
                     marginTop: TOKENS.spacing.lg,
                     display: 'grid',
-                    gridTemplateColumns: 'repeat(4, minmax(0, 1fr))',
+                    gridTemplateColumns: isMobile ? 'repeat(2, minmax(0, 1fr))' : 'repeat(4, minmax(0, 1fr))',
                     gap: TOKENS.spacing.sm,
                   }}
                 >
@@ -1134,7 +1323,7 @@ export default function UniswapDesignSystem() {
             title="Controls"
             subtitle="Single-purpose interaction primitives."
           >
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: TOKENS.spacing.lg }}>
+            <div style={{ display: 'grid', gridTemplateColumns: isTablet ? '1fr' : '1fr 1fr', gap: TOKENS.spacing.lg }}>
               <SubSection title="Buttons">
                 <div style={{ display: 'flex', gap: TOKENS.spacing.sm, flexWrap: 'wrap' }}>
                   <MarketButton leadingIcon={<RefreshCw size={20} strokeWidth={2.5} />}>
@@ -1163,7 +1352,7 @@ export default function UniswapDesignSystem() {
               </SubSection>
             </div>
 
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: TOKENS.spacing.lg }}>
+            <div style={{ display: 'grid', gridTemplateColumns: isTablet ? '1fr' : '1fr 1fr', gap: TOKENS.spacing.lg }}>
               <SubSection title="Segmented control">
                 <SegmentedControl options={TIME_PERIODS} value={timePeriod} onChange={(value) => setTimePeriod(value as (typeof TIME_PERIODS)[number])} />
               </SubSection>
@@ -1193,7 +1382,7 @@ export default function UniswapDesignSystem() {
               </SubSection>
             </div>
 
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: TOKENS.spacing.lg }}>
+            <div style={{ display: 'grid', gridTemplateColumns: isTablet ? '1fr' : '1fr 1fr', gap: TOKENS.spacing.lg }}>
               <SubSection title="Underline tabs">
                 <UnderlineTabs
                   options={['Overview', 'Tokens', 'NFTs', 'Activity']}
