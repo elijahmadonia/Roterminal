@@ -33,8 +33,8 @@ interface RobloxSearchResponse {
   matches: RobloxSearchMatch[]
 }
 
-async function fetchJson<T>(url: string): Promise<T> {
-  const response = await fetch(url)
+async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(url, init)
   const requestId = response.headers.get('x-request-id')
 
   if (!response.ok) {
@@ -118,9 +118,11 @@ export async function runScreenerQuery(query: string): Promise<ScreenerResponse>
 
 export async function searchRobloxGamesByName(
   query: string,
+  signal?: AbortSignal,
 ): Promise<RobloxSearchMatch[]> {
   return fetchJson<RobloxSearchResponse>(
     `${BACKEND_API_BASE}/search?query=${encodeURIComponent(query)}`,
+    { signal },
   ).then((response) => response.matches)
 }
 

@@ -12,9 +12,11 @@ import type {
   TrendPoint,
 } from '../types'
 import { fetchGameLivePoint } from '../api/roblox'
+import { GameImageIcon } from '../components/market-ui/GameImageIcon'
 import { LiveLineChart } from '../components/market-ui/LiveLineChart'
 import { LiveMetricHero } from '../components/market-ui/LiveMetricHero'
 import { MarketButton } from '../components/market-ui/MarketButton'
+import { PlayerHeatmap } from '../components/market-ui/PlayerHeatmap'
 import { SegmentedControl } from '../components/market-ui/SegmentedControl'
 import { Skeleton } from '../components/market-ui/Skeleton'
 import { SurfacePanel } from '../components/market-ui/SurfacePanel'
@@ -43,6 +45,7 @@ type GamePageProps = {
   chartRange: ChartRange
   availableRanges: ChartRange[]
   onChangeRange: (range: ChartRange) => void
+  onOpenHeatPage: () => void
 }
 
 const CHART_RANGE_SECONDS: Record<ChartRange, number> = {
@@ -962,79 +965,6 @@ function PortfolioPreview({ games }: { games: DetailPortfolioGame[] }) {
   )
 }
 
-function HeatmapPreview({
-  items,
-}: {
-  items: Array<{
-    hour: number
-    averageCCU: number
-  }>
-}) {
-  const maxValue = Math.max(...items.map((item) => item.averageCCU), 1)
-  const compactLayout = useContext(GamePageCompactContext)
-
-  return (
-    <div style={{ display: 'grid', gap: TOKENS.spacing.sm }}>
-      <div
-        style={{
-          display: 'grid',
-          gridTemplateColumns: compactLayout
-            ? 'repeat(3, minmax(0, 1fr))'
-            : 'repeat(6, minmax(0, 1fr))',
-          gap: TOKENS.spacing.xs,
-        }}
-      >
-        {items.map((item) => {
-          const intensity = Math.max(item.averageCCU / maxValue, 0.12)
-
-          return (
-            <div
-              key={item.hour}
-              style={{
-                display: 'grid',
-                gap: TOKENS.spacing.xxs,
-                padding: TOKENS.spacing.xs,
-                borderRadius: '10px',
-                border: `1px solid ${TOKENS.colors.surface3}`,
-                background: `rgba(255, 255, 255, ${intensity * 0.18})`,
-              }}
-            >
-              <div
-                style={{
-                  color: TOKENS.colors.neutral2,
-                  fontSize: TOKENS.typography.body3.size,
-                  lineHeight: TOKENS.typography.body3.lineHeight,
-                }}
-              >
-                {item.hour.toString().padStart(2, '0')}:00
-              </div>
-              <div
-                style={{
-                  color: TOKENS.colors.neutral1,
-                  fontSize: TOKENS.typography.body3.size,
-                  lineHeight: TOKENS.typography.body3.lineHeight,
-                  fontWeight: 500,
-                }}
-              >
-                <WholeNumber value={item.averageCCU} />
-              </div>
-            </div>
-          )
-        })}
-      </div>
-      <div
-        style={{
-          color: TOKENS.colors.neutral2,
-          fontSize: TOKENS.typography.body3.size,
-          lineHeight: TOKENS.typography.body3.lineHeight,
-        }}
-      >
-        Last 24 hours of observed CCU by local hour.
-      </div>
-    </div>
-  )
-}
-
 function ComparablePreview({ games }: { games: DetailComparableGame[] }) {
   const compactLayout = useContext(GamePageCompactContext)
 
@@ -1126,10 +1056,8 @@ export default function GamePage({
   chartRange,
   availableRanges,
   onChangeRange,
+  onOpenHeatPage,
 }: GamePageProps) {
-  const [loadedThumbnailUrl, setLoadedThumbnailUrl] = useState<string | null>(null)
-  const [failedThumbnailUrl, setFailedThumbnailUrl] = useState<string | null>(null)
-  const [thumbnailRetryNonce, setThumbnailRetryNonce] = useState(0)
   const [isPreparingShare, setIsPreparingShare] = useState(false)
   const [selectedShareVariant, setSelectedShareVariant] =
     useState<(typeof SHARE_VARIANT_OPTIONS)[number]['id']>('poster')
@@ -1142,10 +1070,6 @@ export default function GamePage({
   const [sharePreviewFile, setSharePreviewFile] = useState<File | null>(null)
   const viewportWidth = useViewportWidth()
   const isMobile = viewportWidth > 0 && viewportWidth <= 640
-  const activeThumbnailUrl =
-    gameDetail?.game.universeId != null && thumbnailRetryNonce > 0
-      ? `/api/game-icon/${gameDetail.game.universeId}?refresh=${thumbnailRetryNonce}`
-      : gameDetail?.game.thumbnailUrl
 
   useEffect(() => {
     return () => {
@@ -1745,55 +1669,15 @@ export default function GamePage({
                 flex: '1 1 420px',
               }}
             >
-              <div
-                className="market-glass-frame"
+              <GameImageIcon
+                label={game.name}
+                size={72}
+                imageUrl={game.thumbnailUrl}
+                universeId={game.universeId}
                 style={{
-                  width: '72px',
-                  height: '72px',
-                  borderRadius: '25%',
-                  overflow: 'hidden',
-                  background: TOKENS.colors.surface2,
                   flexShrink: 0,
                 }}
-              >
-                {game.thumbnailUrl ? (
-                  <img
-                    src={activeThumbnailUrl}
-                    alt=""
-                    onLoad={() => setLoadedThumbnailUrl(activeThumbnailUrl ?? null)}
-                    onError={() => {
-                      if (thumbnailRetryNonce === 0 && game.universeId != null) {
-                        setThumbnailRetryNonce(Date.now())
-                        return
-                      }
-
-                      setFailedThumbnailUrl(activeThumbnailUrl ?? null)
-                    }}
-                    style={{
-                      display:
-                        activeThumbnailUrl &&
-                        loadedThumbnailUrl === activeThumbnailUrl &&
-                        failedThumbnailUrl !== activeThumbnailUrl
-                          ? 'block'
-                          : 'none',
-                    }}
-                    className="market-glass-image"
-                  />
-                ) : null}
-                {!activeThumbnailUrl ||
-                loadedThumbnailUrl !== activeThumbnailUrl ||
-                failedThumbnailUrl === activeThumbnailUrl ? (
-                  <div
-                    aria-hidden="true"
-                    style={{
-                      width: '100%',
-                      height: '100%',
-                      background:
-                        'linear-gradient(90deg, rgba(255,255,255,0.06) 0%, rgba(255,255,255,0.12) 45%, rgba(255,255,255,0.06) 100%)',
-                    }}
-                  />
-                ) : null}
-              </div>
+              />
 
               <div style={{ display: 'grid', gap: '2px', minWidth: 0 }}>
                 <h1
@@ -1898,7 +1782,7 @@ export default function GamePage({
               <div
                 style={{
                   display: 'grid',
-                  gridTemplateColumns: isMobile ? '1fr' : 'repeat(2, minmax(0, 1fr))',
+                  gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))',
                   gap: TOKENS.spacing.md,
                 }}
               >
@@ -1910,6 +1794,14 @@ export default function GamePage({
                   onClick={openSharePreview}
                 >
                   {isPreparingShare ? 'Preparing…' : 'Share'}
+                </MarketButton>
+                <MarketButton
+                  type="button"
+                  variant="secondary"
+                  style={{ width: '100%' }}
+                  onClick={onOpenHeatPage}
+                >
+                  Heatpage
                 </MarketButton>
                 <MarketButton
                   type="button"
@@ -2634,20 +2526,46 @@ export default function GamePage({
             <SectionNote note={dataSections.socialDiscovery.note} />
           </SurfacePanel>
 
-          <SurfacePanel title="Player heatmap">
-            {dataSections.players.hourlyHeatmap.length === 0 ? (
-              <div
-                style={{
-                  color: TOKENS.colors.neutral2,
-                  fontSize: TOKENS.typography.body3.size,
-                  lineHeight: TOKENS.typography.body3.lineHeight,
-                }}
-              >
-                No hourly player pattern data returned.
+          <SurfacePanel title="Heatpage">
+            <div style={{ display: 'grid', gap: TOKENS.spacing.md }}>
+              <div style={{ display: 'grid', gap: TOKENS.spacing.sm }}>
+                <StatRow
+                  label="Heatmap status"
+                  value={formatAvailability(dataSections.players.status)}
+                />
+                <StatRow
+                  label="Hourly windows"
+                  value={renderWholeNumber(dataSections.players.hourlyHeatmap.length)}
+                />
               </div>
-            ) : (
-              <HeatmapPreview items={dataSections.players.hourlyHeatmap} />
-            )}
+
+              {dataSections.players.hourlyHeatmap.length === 0 ? (
+                <div
+                  style={{
+                    color: TOKENS.colors.neutral2,
+                    fontSize: TOKENS.typography.body3.size,
+                    lineHeight: TOKENS.typography.body3.lineHeight,
+                  }}
+                >
+                  No hourly player pattern data returned.
+                </div>
+              ) : (
+                <PlayerHeatmap
+                  items={dataSections.players.hourlyHeatmap}
+                  caption="Preview only. Open the dedicated heatpage for the full view."
+                />
+              )}
+
+              <div>
+                <MarketButton
+                  type="button"
+                  variant="secondary"
+                  onClick={onOpenHeatPage}
+                >
+                  Open heatpage
+                </MarketButton>
+              </div>
+            </div>
           </SurfacePanel>
 
           <SurfacePanel title="Screenshots">

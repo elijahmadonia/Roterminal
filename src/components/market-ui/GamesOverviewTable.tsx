@@ -5,6 +5,7 @@ import { ArrowDown } from 'lucide-react'
 import { TOKENS } from '../../design/marketTokens'
 import { useViewportWidth } from '../../hooks/useViewportWidth'
 import { PercentNumber } from '../ui/AnimatedNumber'
+import { GameImageIcon } from './GameImageIcon'
 import { MiniTrendChart } from './MiniTrendChart'
 import { Skeleton } from './Skeleton'
 
@@ -211,79 +212,6 @@ function DeltaValue({ value }: { value: number }) {
         style={{ color: TOKENS.colors.neutral1 }}
       />
     </span>
-  )
-}
-
-function GameBadge({
-  label,
-  size = 48,
-  imageUrl,
-  universeId,
-}: {
-  label: string
-  size?: number
-  imageUrl?: string
-  universeId?: number
-}) {
-  const [loadedImageUrl, setLoadedImageUrl] = useState<string | null>(null)
-  const [failedImageUrl, setFailedImageUrl] = useState<string | null>(null)
-  const [retryNonce, setRetryNonce] = useState(0)
-  const retryUrl =
-    retryNonce > 0 && universeId != null ? `/api/game-icon/${universeId}?refresh=${retryNonce}` : null
-  const activeImageUrl =
-    retryUrl ?? imageUrl ?? (universeId != null ? `/api/game-icon/${universeId}` : null)
-  const showImage =
-    Boolean(activeImageUrl) &&
-    loadedImageUrl === activeImageUrl &&
-    failedImageUrl !== activeImageUrl
-
-  return (
-    <div
-      className="market-glass-frame"
-      aria-label={label}
-      title={label}
-      style={{
-        width: `${size}px`,
-        height: `${size}px`,
-        borderRadius: '25%',
-        background: TOKENS.colors.surface2,
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        color: TOKENS.colors.neutral1,
-        fontSize: `${Math.max(size * 0.32, 11)}px`,
-        fontWeight: 700,
-        flexShrink: 0,
-        overflow: 'hidden',
-      }}
-    >
-      {activeImageUrl && failedImageUrl !== activeImageUrl ? (
-        <img
-          src={activeImageUrl}
-          alt=""
-          onLoad={() => setLoadedImageUrl(activeImageUrl)}
-          onError={() => {
-            if (retryNonce === 0 && universeId != null && imageUrl != null) {
-              setRetryNonce(Date.now())
-              return
-            }
-
-            setFailedImageUrl(activeImageUrl)
-          }}
-          className="market-glass-image"
-          style={{
-            display: showImage ? 'block' : 'none',
-          }}
-        />
-      ) : null}
-      {!showImage ? (
-        <Skeleton
-          width="100%"
-          height="100%"
-          radius={`${Math.round(size * 0.25)}px`}
-        />
-      ) : null}
-    </div>
   )
 }
 
@@ -495,7 +423,7 @@ export function GamesOverviewTable(props: GamesOverviewTableProps) {
                             #{row.rank ?? index + 1}
                           </span>
                         ) : null}
-                        <GameBadge
+                        <GameImageIcon
                           label={row.name}
                           size={44}
                           imageUrl={row.thumbnailUrl}
@@ -807,7 +735,7 @@ export function GamesOverviewTable(props: GamesOverviewTableProps) {
                     minWidth: 0,
                   }}
                 >
-                  <GameBadge
+                  <GameImageIcon
                     label={row.name}
                     size={48}
                     imageUrl={row.thumbnailUrl}
@@ -1006,7 +934,7 @@ export function GamesOverviewTable(props: GamesOverviewTableProps) {
                     >
                       #{row.rank}
                     </span>
-                    <GameBadge
+                    <GameImageIcon
                       label={row.name}
                       size={44}
                       imageUrl={row.thumbnailUrl}
@@ -1210,7 +1138,7 @@ export function GamesOverviewTable(props: GamesOverviewTableProps) {
                 minWidth: 0,
               }}
             >
-              <GameBadge
+              <GameImageIcon
                 label={row.name}
                 size={48}
                 imageUrl={row.thumbnailUrl}

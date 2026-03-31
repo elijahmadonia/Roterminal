@@ -10,6 +10,7 @@ import {
 } from 'lucide-react'
 
 import { searchRobloxGamesByName, type RobloxSearchMatch } from '../api/roblox'
+import { GameImageIcon } from './market-ui/GameImageIcon'
 import { topGamesByCcu } from '../data/homeOverview'
 import { TOKENS } from '../design/marketTokens'
 
@@ -311,16 +312,17 @@ function SearchOverlay({
         className="app-shell__searchPanel"
         onClick={(event) => event.stopPropagation()}
         style={{
-          background: `linear-gradient(180deg, ${TOKENS.colors.surface4}, ${TOKENS.colors.surface2})`,
-          border: `1px solid ${TOKENS.colors.neutral4}C0`,
+          background:
+            'radial-gradient(circle at top left, rgba(255, 55, 199, 0.14) 0%, rgba(255, 55, 199, 0) 34%), linear-gradient(180deg, rgba(0, 82, 255, 0.12) 0%, rgba(0, 82, 255, 0) 48%), #1B1B1B',
+          border: `1px solid ${TOKENS.colors.surface3}`,
           boxShadow: '0 36px 80px rgba(0, 0, 0, 0.42)',
         }}
       >
         <div
           className="app-shell__searchField"
           style={{
-            background: '#202020',
-            border: `1px solid ${TOKENS.colors.neutral4}44`,
+            background: TOKENS.colors.surface1,
+            border: `1px solid ${TOKENS.colors.surface3}`,
             boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.03)',
           }}
         >
@@ -385,13 +387,26 @@ function SearchOverlay({
 
         <div className="app-shell__searchResults">
           {error ? (
-            <div className="app-shell__searchStatus">
+            <div
+              className="app-shell__searchStatus"
+              style={{
+                background: TOKENS.colors.surface1,
+                borderColor: `${TOKENS.colors.warning}44`,
+                color: TOKENS.colors.warning,
+              }}
+            >
               {error}
             </div>
           ) : null}
 
           {!error && !isPending && hasLiveQuery && visibleResults.length === 0 ? (
-            <div className="app-shell__searchStatus">
+            <div
+              className="app-shell__searchStatus"
+              style={{
+                background: TOKENS.colors.surface1,
+                borderColor: TOKENS.colors.surface3,
+              }}
+            >
               No matches yet. Try a broader game name or paste a Roblox place link.
             </div>
           ) : null}
@@ -412,15 +427,25 @@ function SearchOverlay({
                   className="app-shell__searchResult"
                   onClick={() => onSelect({ universeId: item.universeId, name: item.name })}
                   style={{
-                    background: 'rgba(255, 255, 255, 0.05)',
-                    border: `1px solid ${TOKENS.colors.neutral4}40`,
+                    background: TOKENS.colors.surface1,
+                    border: `1px solid ${TOKENS.colors.surface3}`,
+                    boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.04)',
                   }}
                 >
                   <div className="app-shell__searchResultMain">
-                    <SearchResultGlyph
-                      label={item.name}
-                      accentColor={accentColor}
-                    />
+                    {isMatch ? (
+                      <GameImageIcon
+                        label={item.name}
+                        size={48}
+                        universeId={item.universeId}
+                        background={TOKENS.colors.surface2}
+                      />
+                    ) : (
+                      <SearchResultGlyph
+                        label={item.name}
+                        accentColor={accentColor}
+                      />
+                    )}
 
                     <div className="app-shell__searchResultCopy">
                       <div
@@ -446,16 +471,30 @@ function SearchOverlay({
                     </div>
                   </div>
 
-                  <span
-                    className="app-shell__searchBadge"
-                    style={{
-                      color: TOKENS.colors.neutral2,
-                      border: `1px solid ${TOKENS.colors.neutral4}AA`,
-                      background: 'rgba(255, 255, 255, 0.02)',
-                    }}
-                  >
-                    {metaLabel}
-                  </span>
+                  <div className="app-shell__searchBadges">
+                    <span
+                      className="app-shell__searchBadge"
+                      style={{
+                        color: TOKENS.colors.neutral1,
+                        border: `1px solid ${TOKENS.colors.surface3}`,
+                        background: 'rgba(255, 255, 255, 0.04)',
+                      }}
+                    >
+                      {metaLabel}
+                    </span>
+                    {isMatch ? (
+                      <span
+                        className="app-shell__searchBadge"
+                        style={{
+                          color: TOKENS.colors.neutral2,
+                          border: `1px solid ${TOKENS.colors.surface3}`,
+                          background: 'rgba(255, 255, 255, 0.02)',
+                        }}
+                      >
+                        {`${Math.round(item.approval)}% approval`}
+                      </span>
+                    ) : null}
+                  </div>
                 </button>
               )
             })
@@ -560,21 +599,21 @@ export default function AppShell({
       return
     }
 
-    let isCancelled = false
+    const controller = new AbortController()
     setIsSearchPending(true)
     setSearchError(null)
 
     const timeout = window.setTimeout(async () => {
       try {
-        const matches = await searchRobloxGamesByName(normalizedQuery)
+        const matches = await searchRobloxGamesByName(normalizedQuery, controller.signal)
 
-        if (isCancelled) {
+        if (controller.signal.aborted) {
           return
         }
 
         setSearchResults(matches.slice(0, 8))
       } catch (error) {
-        if (isCancelled) {
+        if (controller.signal.aborted) {
           return
         }
 
@@ -582,14 +621,14 @@ export default function AppShell({
         setSearchResults([])
         setSearchError('Search is unavailable right now.')
       } finally {
-        if (!isCancelled) {
+        if (!controller.signal.aborted) {
           setIsSearchPending(false)
         }
       }
     }, 160)
 
     return () => {
-      isCancelled = true
+      controller.abort()
       window.clearTimeout(timeout)
     }
   }, [isSearchOpen, searchQuery])

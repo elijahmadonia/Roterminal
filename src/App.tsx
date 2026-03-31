@@ -5,6 +5,7 @@ import AppShell from './components/AppShell'
 import { useGameDetail } from './hooks/useGameDetail'
 import ComponentsPage from './pages/ComponentsPage'
 import GamePage from './pages/GamePage'
+import HeatPage from './pages/HeatPage'
 import HomePage from './pages/HomePage'
 import type { ChartRange } from './types'
 import './App.css'
@@ -13,19 +14,30 @@ type AppRoute =
   | { kind: 'home' }
   | { kind: 'components' }
   | { kind: 'game'; universeId: number }
+  | { kind: 'heatpage'; universeId: number }
 
 const gameChartRanges: ChartRange[] = ['30m', '1h', '6h', '24h', '7d', '30d']
 
 function parseRoute(pathname: string): AppRoute {
-  if (pathname === '/') {
+  const normalizedPathname =
+    pathname !== '/' && pathname.endsWith('/')
+      ? pathname.slice(0, -1)
+      : pathname
+
+  if (normalizedPathname === '/') {
     return { kind: 'home' }
   }
 
-  if (pathname === '/components') {
+  if (normalizedPathname === '/components') {
     return { kind: 'components' }
   }
 
-  const gameMatch = pathname.match(/^\/games\/(\d+)$/)
+  const heatPageMatch = normalizedPathname.match(/^\/games\/(\d+)\/heatpage$/)
+  if (heatPageMatch) {
+    return { kind: 'heatpage', universeId: Number(heatPageMatch[1]) }
+  }
+
+  const gameMatch = normalizedPathname.match(/^\/games\/(\d+)$/)
   if (gameMatch) {
     return { kind: 'game', universeId: Number(gameMatch[1]) }
   }
@@ -37,11 +49,18 @@ function gamePath(universeId: number) {
   return `/games/${universeId}`
 }
 
+function heatPagePath(universeId: number) {
+  return `/games/${universeId}/heatpage`
+}
+
 export default function App() {
   const [route, setRoute] = useState<AppRoute>(() => parseRoute(window.location.pathname))
   const [gameChartRange, setGameChartRange] = useState<ChartRange>('24h')
 
-  const selectedGameId = route.kind === 'game' ? route.universeId : null
+  const selectedGameId =
+    route.kind === 'game' || route.kind === 'heatpage'
+      ? route.universeId
+      : null
   const {
     data: gameDetail,
     error: gameError,
@@ -76,6 +95,10 @@ export default function App() {
     navigateTo({ kind: 'game', universeId }, gamePath(universeId))
   }
 
+  const navigateToHeatPage = (universeId: number) => {
+    navigateTo({ kind: 'heatpage', universeId }, heatPagePath(universeId))
+  }
+
   const openHomeGame = async ({
     universeId,
     name,
@@ -102,6 +125,16 @@ export default function App() {
   if (route.kind === 'components') {
     pageContent = <ComponentsPage />
   }
+  else if (route.kind === 'heatpage') {
+    pageContent = (
+      <HeatPage
+        gameDetail={gameDetail}
+        isLoading={isGameLoading}
+        error={gameError}
+        onOpenGameDetail={() => navigateToGame(route.universeId)}
+      />
+    )
+  }
   else if (route.kind === 'game') {
     pageContent = (
       <GamePage
@@ -111,6 +144,7 @@ export default function App() {
         chartRange={gameChartRange}
         availableRanges={gameChartRanges}
         onChangeRange={setGameChartRange}
+        onOpenHeatPage={() => navigateToHeatPage(route.universeId)}
       />
     )
   } else {
@@ -123,7 +157,7 @@ export default function App() {
 
   return (
     <AppShell
-      activeRoute={route.kind}
+      activeRoute={route.kind === 'heatpage' ? 'game' : route.kind}
       onOpenHome={navigateToHome}
       onOpenComponents={navigateToComponents}
       onOpenGame={openHomeGame}
