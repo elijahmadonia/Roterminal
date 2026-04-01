@@ -2137,6 +2137,19 @@ async function fetchPlatformDiscoverySet() {
       }
     }
 
+    const trackedUniverseIds = getTrackedUniverseIds()
+    const trackedIds = trackedUniverseIds.length > 0 ? trackedUniverseIds : DEFAULT_TRACKED_IDS
+    const snapshotGames = getLatestSnapshotGames(trackedIds)
+
+    if (snapshotGames.length > 0) {
+      return {
+        games: snapshotGames,
+        discoveredUniverseIds: snapshotGames.map((game) => game.universeId),
+        discoveredSorts: [],
+        source: 'database',
+      }
+    }
+
     throw error
   }
 }
@@ -2338,15 +2351,20 @@ async function fetchGameLivePointPayload(universeId) {
   } catch (error) {
     const snapshotGame = getLatestSnapshotGames([universeId])[0]
 
-    if (!snapshotGame) {
-      throw error
+    if (snapshotGame) {
+      return {
+        universeId,
+        value: snapshotGame.playing,
+        timestamp: new Date().toISOString(),
+        source: 'database',
+      }
     }
 
     return {
       universeId,
-      value: snapshotGame.playing,
+      value: 0,
       timestamp: new Date().toISOString(),
-      source: 'database',
+      source: 'fallback_empty',
     }
   }
 }
