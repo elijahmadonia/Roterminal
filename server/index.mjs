@@ -4709,14 +4709,21 @@ const server = createServer(async (request, response) => {
       let imageUrl = cachedImageUrl
 
       if (!imageUrl) {
-        const thumbnailPayload = await fetchJson(
-          `https://thumbnails.roblox.com/v1/games/icons?universeIds=${universeId}&size=150x150&format=Png&isCircular=false`,
-          0,
-        )
-        imageUrl = thumbnailPayload.data?.[0]?.imageUrl
+        try {
+          const thumbnailPayload = await fetchJson(
+            `https://thumbnails.roblox.com/v1/games/icons?universeIds=${universeId}&size=150x150&format=Png&isCircular=false`,
+            0,
+          )
+          imageUrl = thumbnailPayload.data?.[0]?.imageUrl
 
-        if (typeof imageUrl === 'string' && imageUrl.length > 0) {
-          writeCache(gameIconRedirectCache, universeId, imageUrl, GAME_ICON_CACHE_TTL_MS)
+          if (typeof imageUrl === 'string' && imageUrl.length > 0) {
+            writeCache(gameIconRedirectCache, universeId, imageUrl, GAME_ICON_CACHE_TTL_MS)
+          }
+        } catch (_error) {
+          const staleImageUrl = readCacheEntry(gameIconRedirectCache, universeId)?.value
+          imageUrl = typeof staleImageUrl === 'string' && staleImageUrl.length > 0
+            ? staleImageUrl
+            : null
         }
       }
 
