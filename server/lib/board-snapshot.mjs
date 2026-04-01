@@ -26,7 +26,7 @@ const PLATFORM_SORT_IDS = [
   'up-and-coming',
   'top-revisited',
 ]
-const BOARD_LEADERBOARD_LIMIT = 50
+const BOARD_LEADERBOARD_LIMIT = 500
 export const BOARD_WATCHLIST_LIMIT = 200
 
 function formatCompactNumber(value) {

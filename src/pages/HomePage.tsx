@@ -542,8 +542,8 @@ export default function HomePage({
       },
       {
         root: null,
-        rootMargin: '320px 0px',
-        threshold: 0,
+        rootMargin: '0px 0px 96px 0px',
+        threshold: 0.9,
       },
     )
 
@@ -629,7 +629,7 @@ export default function HomePage({
                     lineHeight: TOKENS.typography.body3.lineHeight,
                   }}
                 >
-                  Search moved to the left rail. The board below loads {Math.min(HOME_TABLE_BATCH_SIZE, topLeaderboard.length)} games first, then keeps adding more as you scroll.
+                  Search moved to the left rail. The board below loads 25 games at a time as you scroll.
                 </div>
               </div>
 
@@ -737,7 +737,7 @@ export default function HomePage({
                     lineHeight: TOKENS.typography.body3.lineHeight,
                   }}
                 >
-                  Loading more games as you scroll.
+                  Scroll to load the next 25 games.
                 </div>
               ) : null}
             </div>
