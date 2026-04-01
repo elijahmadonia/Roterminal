@@ -2573,49 +2573,29 @@ async function fetchFullPlatformStats(range = '24h') {
     }
   }
 
-  const { startDatetime, endDatetime } = buildPlatformStatsWindow(range)
-
-  try {
-    const response = await fetchJsonWithOptions(
-      FULL_PLATFORM_STATS_URL,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          start_datetime: startDatetime,
-          end_datetime: endDatetime,
-        }),
+  const staleStats = readCacheEntry(platformStatsCache, range)
+  if (staleStats?.value) {
+    return {
+      ...staleStats.value,
+      source: 'cache',
+      status: {
+        ...staleStats.value.status,
+        label: 'Full platform CCU using cache',
       },
-      0,
-    )
-
-    const normalized = normalizePlatformStatsPayload(response?.data ?? response, 'live', range)
-    await recordPlatformCurrentMetric(normalized.latest)
-    writeCache(platformStatsCache, range, normalized, getPlatformStatsCacheTtlMs(range))
-    return normalized
-  } catch (error) {
-    const staleStats = readCacheEntry(platformStatsCache, range)
-
-    if (staleStats) {
-      return {
-        ...staleStats.value,
+      latest: {
+        ...staleStats.value.latest,
         source: 'cache',
-        status: {
-          ...staleStats.value.status,
-          label: 'Full platform CCU using cache',
-        },
-        latest: {
-          ...staleStats.value.latest,
-          source: 'cache',
-        },
-      }
+      },
     }
+  }
 
-    const boardSnapshot = await fetchPlatformBoardPayload('24h').catch(() => null)
-    if (boardSnapshot?.leaderboard?.length) {
-      const latestValue = boardSnapshot.leaderboard.reduce(
+  const buildFastPlatformFallback = async () => {
+    const storedBoard =
+      (await getBoardSnapshot('24h').catch(() => null)) ??
+      (await fetchPlatformBoardPayload('24h').catch(() => null))
+
+    if (storedBoard?.leaderboard?.length) {
+      const latestValue = storedBoard.leaderboard.reduce(
         (sum, game) => sum + (Number(game.playing) || 0),
         0,
       )
@@ -2641,7 +2621,37 @@ async function fetchFullPlatformStats(range = '24h') {
       return fallback
     }
 
-    throw error
+    return buildPlatformStatsFallbackPayload(0, new Date().toISOString(), range, 'empty_fallback')
+  }
+
+  if (!SERVER_ENABLE_SCHEDULED_INGEST) {
+    return buildFastPlatformFallback()
+  }
+
+  const { startDatetime, endDatetime } = buildPlatformStatsWindow(range)
+
+  try {
+    const response = await fetchJsonWithOptions(
+      FULL_PLATFORM_STATS_URL,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          start_datetime: startDatetime,
+          end_datetime: endDatetime,
+        }),
+      },
+      0,
+    )
+
+    const normalized = normalizePlatformStatsPayload(response?.data ?? response, 'live', range)
+    await recordPlatformCurrentMetric(normalized.latest)
+    writeCache(platformStatsCache, range, normalized, getPlatformStatsCacheTtlMs(range))
+    return normalized
+  } catch (error) {
+    return buildFastPlatformFallback()
   }
 }
 
@@ -4137,6 +4147,46 @@ async function fetchGamePagePayload(universeId, range = '24h', detailLevel = 'fu
       }
     }
 
+    let historyMap = new Map()
+    try {
+      historyMap = await getHistoryMap([universeId], getGameHistoryCutoffIso(range))
+    } catch (error) {
+      console.error(`[game-page] Failed to read history for ${universeId}`, error)
+    }
+
+    if (detailLevel === 'core') {
+      let trackedUniverseIds = []
+      try {
+        trackedUniverseIds = await getTrackedUniverseIds()
+      } catch (trackedError) {
+        console.error('[game-page] Failed to read tracked universe ids for core response', trackedError)
+      }
+
+      void appendTrackedUniverseIds([universeId], TRACKED_UNIVERSE_CAP).catch((trackedError) => {
+        console.error(`[game-page] Failed to append tracked universe ${universeId}`, trackedError)
+      })
+
+      const payload = buildGameDetailPayload(
+        games[0],
+        historyMap,
+        [],
+        new Map(),
+        trackedUniverseIds,
+        buildUnavailableGameSupplementalData(games[0]),
+        source,
+        range,
+      )
+
+      writeCache(
+        gamePageCache,
+        cacheKey,
+        payload,
+        getGamePagePayloadCacheTtlMs(range, detailLevel),
+      )
+
+      return payload
+    }
+
     let trackedUniverseIds = []
     try {
       trackedUniverseIds = await appendTrackedUniverseIds([universeId], TRACKED_UNIVERSE_CAP)
@@ -4149,13 +4199,6 @@ async function fetchGamePagePayload(universeId, range = '24h', detailLevel = 'fu
         console.error('[game-page] Failed to read tracked universe ids after append failure', trackedError)
         trackedUniverseIds = []
       }
-    }
-
-    let historyMap = new Map()
-    try {
-      historyMap = await getHistoryMap([universeId], getGameHistoryCutoffIso(range))
-    } catch (error) {
-      console.error(`[game-page] Failed to read history for ${universeId}`, error)
     }
 
     let peerGames = []
