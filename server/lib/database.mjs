@@ -9,6 +9,7 @@ import {
 } from '../config.mjs'
 
 const PLATFORM_METRIC_KEY = 'platform_ccu'
+const DEGRADED_PLATFORM_SOURCES = ['board_fallback', 'stored_fallback', 'empty_fallback']
 
 function hasTableColumn(db, tableName, columnName) {
   return db
@@ -897,7 +898,15 @@ export async function createDatabase() {
       playing = excluded.playing,
       source = excluded.source,
       updated_at = CURRENT_TIMESTAMP
-    WHERE excluded.observed_at >= platform_current_metrics.observed_at
+    WHERE CASE
+      WHEN platform_current_metrics.source IN (${DEGRADED_PLATFORM_SOURCES.map(() => '?').join(', ')})
+        AND excluded.source NOT IN (${DEGRADED_PLATFORM_SOURCES.map(() => '?').join(', ')})
+        THEN 1
+      WHEN platform_current_metrics.source NOT IN (${DEGRADED_PLATFORM_SOURCES.map(() => '?').join(', ')})
+        AND excluded.source IN (${DEGRADED_PLATFORM_SOURCES.map(() => '?').join(', ')})
+        THEN 0
+      ELSE excluded.observed_at >= platform_current_metrics.observed_at
+    END
   `)
 
   const upsertPlatformHistoryPointStmt = db.prepare(`
@@ -1945,6 +1954,10 @@ export async function createDatabase() {
       point.timestamp,
       Math.round(point.value),
       point.source ?? 'live',
+      ...DEGRADED_PLATFORM_SOURCES,
+      ...DEGRADED_PLATFORM_SOURCES,
+      ...DEGRADED_PLATFORM_SOURCES,
+      ...DEGRADED_PLATFORM_SOURCES,
     )
   }
 

@@ -9,6 +9,7 @@ import {
 } from '../config.mjs'
 
 const PLATFORM_METRIC_KEY = 'platform_ccu'
+const DEGRADED_PLATFORM_SOURCES = ['board_fallback', 'stored_fallback', 'empty_fallback']
 
 function sanitizeUniverseIds(universeIds) {
   return [...new Set(
@@ -1058,13 +1059,25 @@ export async function createPostgresStore() {
           playing = EXCLUDED.playing,
           source = EXCLUDED.source,
           updated_at = NOW()
-        WHERE EXCLUDED.observed_at >= platform_current_metrics.observed_at
+        WHERE CASE
+          WHEN platform_current_metrics.source = ANY($5::text[])
+            AND EXCLUDED.source <> ALL($6::text[])
+            THEN TRUE
+          WHEN platform_current_metrics.source <> ALL($7::text[])
+            AND EXCLUDED.source = ANY($8::text[])
+            THEN FALSE
+          ELSE EXCLUDED.observed_at >= platform_current_metrics.observed_at
+        END
       `,
       [
         PLATFORM_METRIC_KEY,
         normalizeTimestamp(point.timestamp),
         Math.round(Number(point.value)),
         String(point.source ?? 'live'),
+        DEGRADED_PLATFORM_SOURCES,
+        DEGRADED_PLATFORM_SOURCES,
+        DEGRADED_PLATFORM_SOURCES,
+        DEGRADED_PLATFORM_SOURCES,
       ],
     )
   }

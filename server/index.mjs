@@ -307,6 +307,11 @@ let lastHomeFetchSeedFailureCount = 0
 const startedAt = Date.now()
 const schedulerOwnerId = `api-server:${process.pid}:${randomUUID()}`
 let scheduledIngestInFlight = false
+const DEGRADED_PLATFORM_SOURCES = new Set([
+  'board_fallback',
+  'stored_fallback',
+  'empty_fallback',
+])
 
 function gameIconPath(universeId) {
   return `/api/game-icon/${universeId}`
@@ -2805,7 +2810,7 @@ async function fetchFullPlatformPointPayload() {
 
       if (
         cachedStats?.latest &&
-        !['board_fallback', 'stored_fallback', 'empty_fallback'].includes(
+        !DEGRADED_PLATFORM_SOURCES.has(
           String(cachedStats.source ?? cachedStats.latest.source ?? ''),
         )
       ) {
@@ -2814,6 +2819,18 @@ async function fetchFullPlatformPointPayload() {
     }
 
     const storedPoint = await getPlatformCurrentMetric()
+    const storedPointDegraded = DEGRADED_PLATFORM_SOURCES.has(String(storedPoint?.source ?? ''))
+
+    if (storedPoint && !storedPointDegraded) {
+      return storedPoint
+    }
+
+    const payload = await fetchFullPlatformStats('24h')
+    const payloadSource = String(payload?.source ?? payload?.latest?.source ?? '')
+
+    if (payload?.latest && !DEGRADED_PLATFORM_SOURCES.has(payloadSource)) {
+      return payload.latest
+    }
 
     if (storedPoint) {
       return storedPoint
@@ -2827,7 +2844,6 @@ async function fetchFullPlatformPointPayload() {
       }
     }
 
-    const payload = await fetchFullPlatformStats('24h')
     return payload.latest
   } catch (_error) {
     return fetchBoardLivePointPayload()
@@ -4573,7 +4589,7 @@ async function getOpsMetrics() {
   const platformLatestHistoryPoint =
     platformHistory24h.length > 0 ? platformHistory24h[platformHistory24h.length - 1] : null
   const platformResolvedSource = lastPlatformStatsResolvedSource ?? platformCurrentMetric?.source ?? null
-  const platformDegraded = ['board_fallback', 'stored_fallback', 'empty_fallback'].includes(
+  const platformDegraded = DEGRADED_PLATFORM_SOURCES.has(
     String(platformResolvedSource ?? ''),
   )
 

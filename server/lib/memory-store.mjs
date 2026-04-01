@@ -4,6 +4,8 @@ import {
   SNAPSHOT_RETENTION_MS,
 } from '../config.mjs'
 
+const DEGRADED_PLATFORM_SOURCES = new Set(['board_fallback', 'stored_fallback', 'empty_fallback'])
+
 function sanitizeUniverseIds(universeIds) {
   return [...new Set(
     (Array.isArray(universeIds) ? universeIds : [])
@@ -601,10 +603,32 @@ export async function createMemoryStore() {
       return
     }
 
+    const incomingTimestamp = Date.parse(String(point.timestamp))
+    const incomingSource = String(point.source ?? 'live')
+    const existingTimestamp = Date.parse(String(platformCurrentMetric?.timestamp ?? ''))
+    const existingSource = String(platformCurrentMetric?.source ?? '')
+    const incomingDegraded = DEGRADED_PLATFORM_SOURCES.has(incomingSource)
+    const existingDegraded = DEGRADED_PLATFORM_SOURCES.has(existingSource)
+
+    if (platformCurrentMetric) {
+      if (!existingDegraded && incomingDegraded) {
+        return
+      }
+
+      if (
+        !(existingDegraded && !incomingDegraded) &&
+        Number.isFinite(incomingTimestamp) &&
+        Number.isFinite(existingTimestamp) &&
+        incomingTimestamp < existingTimestamp
+      ) {
+        return
+      }
+    }
+
     platformCurrentMetric = {
       value: Math.round(Number(point.value)),
       timestamp: String(point.timestamp),
-      source: String(point.source ?? 'live'),
+      source: incomingSource,
     }
   }
 
