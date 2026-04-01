@@ -678,8 +678,10 @@ async function fetchUniverseGamesWithFallback(universeIds, discoveryEntries = []
       `[roterminal-worker] falling back to cached snapshot data for ${universeIds.length} universes after Roblox rate limit`,
     )
 
+    const snapshotGames = await database.getLatestSnapshotGames(universeIds)
+
     return mergeDiscoveredFallbackGames(
-      database.getLatestSnapshotGames(universeIds),
+      snapshotGames,
       discoveryEntries,
     )
   }
