@@ -1248,6 +1248,33 @@ export async function createPostgresStore() {
     return rows.length
   }
 
+  async function deletePlatformHistoryPoints(timestamps) {
+    if (!Array.isArray(timestamps) || timestamps.length === 0) {
+      return 0
+    }
+
+    const normalizedTimestamps = [...new Set(
+      timestamps
+        .map((timestamp) => normalizeTimestamp(timestamp, ''))
+        .filter((timestamp) => timestamp.length > 0),
+    )]
+
+    if (normalizedTimestamps.length === 0) {
+      return 0
+    }
+
+    const result = await pool.query(
+      `
+        DELETE FROM platform_history_points
+        WHERE metric_key = $1
+          AND observed_at = ANY($2::timestamptz[])
+      `,
+      [PLATFORM_METRIC_KEY, normalizedTimestamps],
+    )
+
+    return result.rowCount ?? 0
+  }
+
   async function getPlatformHistoryPoints(cutoffIso) {
     const params = [PLATFORM_METRIC_KEY]
     let cutoffClause = ''
@@ -1338,6 +1365,7 @@ export async function createPostgresStore() {
     getLatestSnapshotGames,
     getPlatformCurrentMetric,
     getPlatformHistoryPoints,
+    deletePlatformHistoryPoints,
     getTrackedDiscoverySourceCounts,
     getTrackedTierCounts,
     getTrackedUniverseRecords,

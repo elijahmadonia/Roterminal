@@ -2008,6 +2008,31 @@ export async function createDatabase() {
     return importedCount
   }
 
+  function deletePlatformHistoryPoints(timestamps) {
+    if (!Array.isArray(timestamps) || timestamps.length === 0) {
+      return 0
+    }
+
+    const normalizedTimestamps = [...new Set(
+      timestamps
+        .map((timestamp) => String(timestamp ?? ''))
+        .filter((timestamp) => timestamp.length > 0),
+    )]
+
+    if (normalizedTimestamps.length === 0) {
+      return 0
+    }
+
+    const placeholders = normalizedTimestamps.map(() => '?').join(', ')
+    const deleteStmt = db.prepare(`
+      DELETE FROM platform_history_points
+      WHERE metric_key = ?
+        AND observed_at IN (${placeholders})
+    `)
+    const result = deleteStmt.run(PLATFORM_METRIC_KEY, ...normalizedTimestamps)
+    return result.changes ?? 0
+  }
+
   function getPlatformHistoryPoints(cutoffIso) {
     const rows =
       typeof cutoffIso === 'string' && cutoffIso.length > 0
@@ -2565,6 +2590,7 @@ export async function createDatabase() {
     getLatestSnapshotGames,
     getPlatformCurrentMetric,
     getPlatformHistoryPoints,
+    deletePlatformHistoryPoints,
     getTrackedUniverseRecords,
     getUniverseRootPlaceMap,
     getTrackedUniverseIds,

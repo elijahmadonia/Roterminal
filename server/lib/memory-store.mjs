@@ -674,6 +674,28 @@ export async function createMemoryStore() {
     return importedCount
   }
 
+  function deletePlatformHistoryPoints(timestamps) {
+    if (!Array.isArray(timestamps) || timestamps.length === 0) {
+      return 0
+    }
+
+    let deletedCount = 0
+
+    for (const timestamp of timestamps) {
+      const normalizedTimestamp = String(timestamp ?? '')
+
+      if (!normalizedTimestamp) {
+        continue
+      }
+
+      if (platformHistoryByTimestamp.delete(normalizedTimestamp)) {
+        deletedCount += 1
+      }
+    }
+
+    return deletedCount
+  }
+
   function getPlatformHistoryPoints(cutoffIso) {
     const cutoffMs = typeof cutoffIso === 'string' ? Date.parse(cutoffIso) : Number.NaN
 
@@ -731,6 +753,7 @@ export async function createMemoryStore() {
     getLatestSnapshotGames,
     getPlatformCurrentMetric,
     getPlatformHistoryPoints,
+    deletePlatformHistoryPoints,
     getTrackedDiscoverySourceCounts,
     getTrackedTierCounts,
     getTrackedUniverseRecords,

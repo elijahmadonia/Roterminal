@@ -13,6 +13,7 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "import:history": "node server/scripts/import-external-history.mjs",
+    "cleanup:platform-history": "node --env-file-if-exists=.env server/scripts/clean-platform-history.mjs",
     "sync:platform-history": "node --env-file-if-exists=.env server/scripts/push-platform-history.mjs",
     "sync:tracked": "node server/scripts/sync-tracked-universes.mjs",
     "install:platform-collector": "node --env-file-if-exists=.env server/scripts/manage-platform-collector.mjs",

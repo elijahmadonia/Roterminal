@@ -343,6 +343,7 @@ const {
   getLatestSnapshotGames,
   getPlatformCurrentMetric,
   getPlatformHistoryPoints,
+  deletePlatformHistoryPoints,
   getTrackedDiscoverySourceCounts,
   getTrackedTierCounts,
   getTrackedUniverseIds,
@@ -827,6 +828,15 @@ function writeCache(cache, key, value, ttlMs) {
 
 function resetPlatformStatsCaches() {
   platformStatsCache.clear()
+}
+
+async function refreshPlatformCurrentMetricFromHistory() {
+  const storedHistory = await getPlatformHistoryPoints()
+  const latestPoint = Array.isArray(storedHistory) ? storedHistory.at(-1) : null
+
+  if (latestPoint?.timestamp && Number.isFinite(Number(latestPoint?.value))) {
+    await recordPlatformCurrentMetric(latestPoint)
+  }
 }
 
 function chunkItems(items, size) {
@@ -5001,25 +5011,38 @@ const server = createServer(async (request, response) => {
       const platformHistoryPoints = Array.isArray(payload?.platformHistoryPoints)
         ? payload.platformHistoryPoints
         : []
+      const deletePlatformHistoryTimestamps = Array.isArray(payload?.deletePlatformHistoryTimestamps)
+        ? payload.deletePlatformHistoryTimestamps
+        : []
       const platformDefaultSource =
         typeof payload?.platformDefaultSource === 'string' && payload.platformDefaultSource.length > 0
           ? payload.platformDefaultSource
           : 'history_import'
 
-      if (platformHistoryPoints.length === 0) {
-        return sendJson(response, 400, { error: 'Missing platformHistoryPoints.' })
+      if (platformHistoryPoints.length === 0 && deletePlatformHistoryTimestamps.length === 0) {
+        return sendJson(response, 400, {
+          error: 'Missing platformHistoryPoints or deletePlatformHistoryTimestamps.',
+        })
       }
 
       const importedPlatformHistoryPoints = await recordPlatformHistoryPoints(
         platformHistoryPoints,
         platformDefaultSource,
       )
+      const deletedPlatformHistoryPoints = await deletePlatformHistoryPoints(
+        deletePlatformHistoryTimestamps,
+      )
+
+      if (deletedPlatformHistoryPoints > 0) {
+        await refreshPlatformCurrentMetricFromHistory()
+      }
 
       resetPlatformStatsCaches()
 
       return sendJson(response, 200, {
         ok: true,
         importedPlatformHistoryPoints,
+        deletedPlatformHistoryPoints,
         platformDefaultSource,
       })
     }
