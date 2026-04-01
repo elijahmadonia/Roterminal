@@ -16,7 +16,6 @@ import { GameImageIcon } from '../components/market-ui/GameImageIcon'
 import { LiveLineChart } from '../components/market-ui/LiveLineChart'
 import { LiveMetricHero } from '../components/market-ui/LiveMetricHero'
 import { MarketButton } from '../components/market-ui/MarketButton'
-import { PlayerHeatmap } from '../components/market-ui/PlayerHeatmap'
 import { SegmentedControl } from '../components/market-ui/SegmentedControl'
 import { Skeleton } from '../components/market-ui/Skeleton'
 import { SurfacePanel } from '../components/market-ui/SurfacePanel'
@@ -45,7 +44,6 @@ type GamePageProps = {
   chartRange: ChartRange
   availableRanges: ChartRange[]
   onChangeRange: (range: ChartRange) => void
-  onOpenHeatPage: () => void
 }
 
 const CHART_RANGE_SECONDS: Record<ChartRange, number> = {
@@ -1056,7 +1054,6 @@ export default function GamePage({
   chartRange,
   availableRanges,
   onChangeRange,
-  onOpenHeatPage,
 }: GamePageProps) {
   const [isPreparingShare, setIsPreparingShare] = useState(false)
   const [selectedShareVariant, setSelectedShareVariant] =
@@ -1799,14 +1796,6 @@ export default function GamePage({
                   type="button"
                   variant="secondary"
                   style={{ width: '100%' }}
-                  onClick={onOpenHeatPage}
-                >
-                  Heatpage
-                </MarketButton>
-                <MarketButton
-                  type="button"
-                  variant="secondary"
-                  style={{ width: '100%' }}
                   leadingIcon={<ExternalLink size={20} strokeWidth={2.4} />}
                   disabled={!robloxGameUrl}
                   onClick={() => {
@@ -2524,48 +2513,6 @@ export default function GamePage({
               />
             </div>
             <SectionNote note={dataSections.socialDiscovery.note} />
-          </SurfacePanel>
-
-          <SurfacePanel title="Heatpage">
-            <div style={{ display: 'grid', gap: TOKENS.spacing.md }}>
-              <div style={{ display: 'grid', gap: TOKENS.spacing.sm }}>
-                <StatRow
-                  label="Heatmap status"
-                  value={formatAvailability(dataSections.players.status)}
-                />
-                <StatRow
-                  label="Hourly windows"
-                  value={renderWholeNumber(dataSections.players.hourlyHeatmap.length)}
-                />
-              </div>
-
-              {dataSections.players.hourlyHeatmap.length === 0 ? (
-                <div
-                  style={{
-                    color: TOKENS.colors.neutral2,
-                    fontSize: TOKENS.typography.body3.size,
-                    lineHeight: TOKENS.typography.body3.lineHeight,
-                  }}
-                >
-                  No hourly player pattern data returned.
-                </div>
-              ) : (
-                <PlayerHeatmap
-                  items={dataSections.players.hourlyHeatmap}
-                  caption="Preview only. Open the dedicated heatpage for the full view."
-                />
-              )}
-
-              <div>
-                <MarketButton
-                  type="button"
-                  variant="secondary"
-                  onClick={onOpenHeatPage}
-                >
-                  Open heatpage
-                </MarketButton>
-              </div>
-            </div>
           </SurfacePanel>
 
           <SurfacePanel title="Screenshots">

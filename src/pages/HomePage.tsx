@@ -1,7 +1,6 @@
 import type { ReactNode } from 'react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { fetchPlatformLivePoint } from '../api/roblox'
-import { CategoryPerformanceMap } from '../components/market-ui/CategoryPerformanceMap'
 import { GamesOverviewTable } from '../components/market-ui/GamesOverviewTable'
 import { LiveLineChart } from '../components/market-ui/LiveLineChart'
 import { LiveMetricHero } from '../components/market-ui/LiveMetricHero'
@@ -11,7 +10,6 @@ import { UnderlineTabs } from '../components/market-ui/UnderlineTabs'
 import {
   ApprovalNumber,
   CompactNumber,
-  PercentNumber,
   WholeNumber,
 } from '../components/ui/AnimatedNumber'
 import { useRollingLiveline } from '../hooks/useRollingLiveline'
@@ -556,78 +554,6 @@ export default function HomePage({
     }
   }, [hasMoreTableRows, tableConfig.rows.length])
 
-  const categoryMapSections = useMemo(() => {
-    if (topLeaderboard.length === 0) return []
-
-    const groups = new Map<string, LiveLeaderboardRow[]>()
-
-    topLeaderboard.slice(0, 48).forEach((game) => {
-      const key = game.genre || 'Other'
-      const next = groups.get(key)
-
-      if (next) {
-        next.push(game)
-        return
-      }
-
-      groups.set(key, [game])
-    })
-
-    return Array.from(groups.entries())
-      .map(([title, games]) => ({
-        title,
-        totalPlaying: games.reduce((sum, game) => sum + game.playing, 0),
-        games: games.slice().sort((left, right) => right.playing - left.playing),
-      }))
-      .sort((left, right) => right.totalPlaying - left.totalPlaying)
-      .slice(0, 10)
-      .map((section, sectionIndex) => {
-        const maxPlaying = section.games[0]?.playing ?? 1
-
-        return {
-          id: section.title,
-          title: section.title,
-          span:
-            (sectionIndex < 2 ? 6 : sectionIndex < 5 ? 4 : 3) as 3 | 4 | 6,
-          items: section.games.slice(0, sectionIndex < 2 ? 10 : 8).map((game, itemIndex) => {
-            const weight = game.playing / maxPlaying
-
-            let span: 'hero' | 'feature' | 'standard' | 'compact' | 'micro' =
-              'micro'
-
-            if (itemIndex === 0) {
-              span = sectionIndex < 2 ? 'hero' : 'feature'
-            } else if (weight >= 0.58) {
-              span = 'feature'
-            } else if (weight >= 0.32) {
-              span = 'standard'
-            } else if (weight >= 0.16) {
-              span = 'compact'
-            }
-
-            const weeklyTone: 'positive' | 'negative' | 'neutral' =
-              game.deltaWeek > 0
-                ? 'positive'
-                : game.deltaWeek < 0
-                  ? 'negative'
-                  : 'neutral'
-
-            return {
-              id: game.universeId,
-              title: game.name,
-              value: <PercentNumber value={game.deltaWeek} signed />,
-              subtitle: <><CompactNumber value={game.playing} flashOnChange /> CCU</>,
-              change: game.deltaWeek,
-              weight: game.playing,
-              imageUrl: game.thumbnailUrl,
-              tone: weeklyTone,
-              span,
-            }
-          }),
-        }
-      })
-  }, [topLeaderboard])
-
   return (
     <div
       style={{
@@ -814,19 +740,6 @@ export default function HomePage({
                   Loading more games as you scroll.
                 </div>
               ) : null}
-            </div>
-
-            <div style={{ gridColumn: '1 / -1' }}>
-              <CategoryPerformanceMap
-                sections={categoryMapSections}
-                loading={isBoardLoading && topLeaderboard.length === 0}
-                onItemClick={(item) =>
-                  onOpenGame({
-                    universeId: Number(item.id),
-                    name: item.title,
-                  })
-                }
-              />
             </div>
           </div>
         </section>

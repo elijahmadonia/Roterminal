@@ -6,6 +6,7 @@ import {
   ChartColumnIncreasing,
   House,
   LoaderCircle,
+  Map,
   Search,
 } from 'lucide-react'
 
@@ -14,12 +15,13 @@ import { GameImageIcon } from './market-ui/GameImageIcon'
 import { topGamesByCcu } from '../data/homeOverview'
 import { TOKENS } from '../design/marketTokens'
 
-type AppShellRoute = 'home' | 'components' | 'game'
+type AppShellRoute = 'home' | 'components' | 'heatmap' | 'game'
 
 type AppShellProps = {
   activeRoute: AppShellRoute
   onOpenHome: () => void
   onOpenComponents: () => void
+  onOpenHeatmap: () => void
   onOpenGame: (game: { universeId?: number; name: string }) => Promise<void>
   children: ReactNode
 }
@@ -509,6 +511,7 @@ export default function AppShell({
   activeRoute,
   onOpenHome,
   onOpenComponents,
+  onOpenHeatmap,
   onOpenGame,
   children,
 }: AppShellProps) {
@@ -560,11 +563,16 @@ export default function AppShell({
         event.preventDefault()
         onOpenComponents()
       }
+
+      if (key === 'm') {
+        event.preventDefault()
+        onOpenHeatmap()
+      }
     }
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [onOpenComponents, onOpenHome])
+  }, [onOpenComponents, onOpenHeatmap, onOpenHome])
 
   useEffect(() => {
     if (!isSearchOpen) {
@@ -691,6 +699,14 @@ export default function AppShell({
                 tooltipLabel="Go to Components"
                 active={activeRoute === 'components'}
                 onClick={onOpenComponents}
+              />
+              <RailButton
+                icon={Map}
+                label="Heatmap"
+                shortcut="M"
+                tooltipLabel="Open Heatmap"
+                active={activeRoute === 'heatmap'}
+                onClick={onOpenHeatmap}
               />
               {activeRoute === 'game' ? (
                 <RailButton
