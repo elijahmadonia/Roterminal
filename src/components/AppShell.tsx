@@ -302,7 +302,7 @@ function SearchOverlay({
       role="presentation"
       onClick={onClose}
       style={{
-        background: 'linear-gradient(180deg, rgba(0, 0, 0, 0.26), rgba(0, 0, 0, 0.64))',
+        background: 'rgba(0, 0, 0, 0.56)',
       }}
     >
       <div
@@ -312,8 +312,7 @@ function SearchOverlay({
         className="app-shell__searchPanel"
         onClick={(event) => event.stopPropagation()}
         style={{
-          background:
-            'radial-gradient(circle at top left, rgba(255, 55, 199, 0.14) 0%, rgba(255, 55, 199, 0) 34%), linear-gradient(180deg, rgba(0, 82, 255, 0.12) 0%, rgba(0, 82, 255, 0) 48%), #1B1B1B',
+          background: TOKENS.colors.surface2,
           border: `1px solid ${TOKENS.colors.surface3}`,
           boxShadow: '0 36px 80px rgba(0, 0, 0, 0.42)',
         }}
@@ -419,6 +418,7 @@ function SearchOverlay({
               const accentColor = isMatch
                 ? TOKENS.colors.base
                 : item.accentColor
+              const shouldUseGameIcon = isMatch || item.universeId != null
 
               return (
                 <button
@@ -433,7 +433,7 @@ function SearchOverlay({
                   }}
                 >
                   <div className="app-shell__searchResultMain">
-                    {isMatch ? (
+                    {shouldUseGameIcon ? (
                       <GameImageIcon
                         label={item.name}
                         size={48}
@@ -525,6 +525,7 @@ export default function AppShell({
         subtitle: game.subtitle,
         meta: `${game.primaryValue} CCU`,
         accentColor: game.accentColor,
+        universeId: game.universeId,
       })),
     [],
   )

@@ -1,5 +1,6 @@
 export type OverviewGameSnapshot = {
   rank?: number
+  universeId?: number
   title: string
   subtitle: string
   primaryValue: string
@@ -38,6 +39,7 @@ export const liveRevenueEstimate = {
 export const topGamesByCcu: OverviewGameSnapshot[] = [
   {
     rank: 1,
+    universeId: 7436755782,
     title: 'Grow a Garden',
     subtitle: 'The Garden Game',
     primaryValue: '1.92M',
@@ -48,6 +50,7 @@ export const topGamesByCcu: OverviewGameSnapshot[] = [
   },
   {
     rank: 2,
+    universeId: 1686885941,
     title: 'Brookhaven RP',
     subtitle: 'Wolfpaq',
     primaryValue: '612K',
@@ -58,6 +61,7 @@ export const topGamesByCcu: OverviewGameSnapshot[] = [
   },
   {
     rank: 3,
+    universeId: 994732206,
     title: 'Blox Fruits',
     subtitle: 'Gamer Robot',
     primaryValue: '488K',
@@ -68,6 +72,7 @@ export const topGamesByCcu: OverviewGameSnapshot[] = [
   },
   {
     rank: 4,
+    universeId: 383310974,
     title: 'Adopt Me!',
     subtitle: 'Uplift Games',
     primaryValue: '356K',
@@ -78,6 +83,7 @@ export const topGamesByCcu: OverviewGameSnapshot[] = [
   },
   {
     rank: 5,
+    universeId: 6325068386,
     title: 'Blue Lock: Rivals',
     subtitle: 'Untitled',
     primaryValue: '244K',
@@ -88,6 +94,7 @@ export const topGamesByCcu: OverviewGameSnapshot[] = [
   },
   {
     rank: 6,
+    universeId: 6331902150,
     title: 'Forsaken',
     subtitle: 'Forsaken',
     primaryValue: '190K',

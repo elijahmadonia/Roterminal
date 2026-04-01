@@ -615,12 +615,7 @@ async function fetchJson(url, retries = MAX_FETCH_RETRIES, init = undefined) {
       return await response.json()
     } catch (error) {
       lastError = error
-      const statusCode = error?.statusCode
-      const isRetryable =
-        statusCode === 429 ||
-        error?.name === 'AbortError' ||
-        error?.cause?.code === 'ECONNRESET' ||
-        error?.cause?.code === 'ETIMEDOUT'
+      const isRetryable = isRetryableFetchError(error)
 
       if (!isRetryable || attempt === retries) {
         throw error
@@ -657,12 +652,7 @@ async function fetchText(url, retries = MAX_FETCH_RETRIES) {
       return await response.text()
     } catch (error) {
       lastError = error
-      const statusCode = error?.statusCode
-      const isRetryable =
-        statusCode === 429 ||
-        error?.name === 'AbortError' ||
-        error?.cause?.code === 'ECONNRESET' ||
-        error?.cause?.code === 'ETIMEDOUT'
+      const isRetryable = isRetryableFetchError(error)
 
       if (!isRetryable || attempt === retries) {
         throw error
@@ -702,12 +692,7 @@ async function fetchJsonWithOptions(url, options = {}, retries = MAX_FETCH_RETRI
       return await response.json()
     } catch (error) {
       lastError = error
-      const statusCode = error?.statusCode
-      const isRetryable =
-        statusCode === 429 ||
-        error?.name === 'AbortError' ||
-        error?.cause?.code === 'ECONNRESET' ||
-        error?.cause?.code === 'ETIMEDOUT'
+      const isRetryable = isRetryableFetchError(error)
 
       if (!isRetryable || attempt === retries) {
         throw error
@@ -721,6 +706,19 @@ async function fetchJsonWithOptions(url, options = {}, retries = MAX_FETCH_RETRI
   }
 
   throw lastError ?? new Error('Unknown fetch failure')
+}
+
+function isRetryableFetchError(error) {
+  const statusCode = error?.statusCode
+  return (
+    statusCode === 408 ||
+    statusCode === 425 ||
+    statusCode === 429 ||
+    (Number.isFinite(statusCode) && statusCode >= 500 && statusCode < 600) ||
+    error?.name === 'AbortError' ||
+    error?.cause?.code === 'ECONNRESET' ||
+    error?.cause?.code === 'ETIMEDOUT'
+  )
 }
 
 function readCache(cache, key) {
@@ -2184,21 +2182,37 @@ async function fetchUniverseGames(universeIds, options = {}) {
   }
 
   try {
-    const [gamesResponse, votesResponse, thumbnailsResponse, bannersResponse] = await Promise.all([
+    const [gamesResult, votesResult, thumbnailsResult, bannersResult] = await Promise.allSettled([
       fetchJson(`https://games.roblox.com/v1/games?universeIds=${idList}`),
       fetchJson(`https://games.roblox.com/v1/games/votes?universeIds=${idList}`),
       fetchJson(
         `https://thumbnails.roblox.com/v1/games/icons?universeIds=${idList}&size=150x150&format=Png&isCircular=false`,
         0,
-      ).catch(() => ({ data: [] })),
+      ),
       fetchJson(
         `https://thumbnails.roblox.com/v1/games/multiget/thumbnails?universeIds=${idList}&size=768x432&format=Png&isCircular=false`,
         0,
-      ).catch(() => ({ data: [] })),
+      ),
     ])
 
+    if (gamesResult.status !== 'fulfilled') {
+      throw gamesResult.reason
+    }
+
+    const gamesResponse = gamesResult.value
+    const snapshotGamesById = new Map(
+      getLatestSnapshotGames(universeIds).map((game) => [game.universeId, game]),
+    )
+    const liveGames = Array.isArray(gamesResponse?.data) ? gamesResponse.data : []
+
+    if (liveGames.length === 0) {
+      const error = new Error(`No live game payload returned for universe ids: ${idList}`)
+      error.statusCode = 503
+      throw error
+    }
+
     const votesById = new Map(
-      votesResponse.data.map((entry) => [
+      (votesResult.status === 'fulfilled' ? votesResult.value?.data : [])?.map((entry) => [
         entry.id,
         {
           upVotes: entry.upVotes,
@@ -2208,22 +2222,37 @@ async function fetchUniverseGames(universeIds, options = {}) {
               ? 0
               : (entry.upVotes / (entry.upVotes + entry.downVotes)) * 100,
         },
-      ]),
+      ]) ?? [],
     )
 
+    snapshotGamesById.forEach((snapshotGame, universeId) => {
+      if (votesById.has(universeId)) {
+        return
+      }
+
+      votesById.set(universeId, {
+        upVotes: snapshotGame.upVotes ?? 0,
+        downVotes: snapshotGame.downVotes ?? 0,
+        approval: snapshotGame.approval ?? 0,
+      })
+    })
+
     const thumbnailsById = new Map(
-      thumbnailsResponse.data.map((entry) => [entry.targetId, entry.imageUrl]),
+      (thumbnailsResult.status === 'fulfilled' ? thumbnailsResult.value?.data : [])?.map((entry) => [
+        entry.targetId,
+        entry.imageUrl,
+      ]) ?? [],
     )
     const bannersById = new Map(
-      bannersResponse.data.map((entry) => [
+      (bannersResult.status === 'fulfilled' ? bannersResult.value?.data : [])?.map((entry) => [
         entry.universeId,
         entry.thumbnails
           ?.map((thumbnail) => thumbnail.imageUrl)
           .filter((imageUrl) => typeof imageUrl === 'string' && imageUrl.length > 0) ?? [],
-      ]),
+      ]) ?? [],
     )
 
-    const games = gamesResponse.data.map((game) => ({
+    const games = liveGames.map((game) => ({
       rootPlaceId: game.rootPlaceId,
       universeId: game.id,
       name: game.name,
@@ -2246,9 +2275,11 @@ async function fetchUniverseGames(universeIds, options = {}) {
       created: game.created,
       updated: game.updated,
       createVipServersAllowed: Boolean(game.createVipServersAllowed),
-      thumbnailUrl: thumbnailsById.has(game.id) ? gameIconPath(game.id) : undefined,
-      bannerUrl: bannersById.get(game.id)?.[0],
-      screenshotUrls: bannersById.get(game.id) ?? [],
+      thumbnailUrl: thumbnailsById.has(game.id)
+        ? gameIconPath(game.id)
+        : snapshotGamesById.get(game.id)?.thumbnailUrl,
+      bannerUrl: bannersById.get(game.id)?.[0] ?? snapshotGamesById.get(game.id)?.bannerUrl,
+      screenshotUrls: bannersById.get(game.id) ?? snapshotGamesById.get(game.id)?.screenshotUrls ?? [],
     }))
 
     thumbnailsById.forEach((imageUrl, universeId) => {
@@ -3847,14 +3878,40 @@ async function fetchGamePagePayload(universeId, range = '24h', detailLevel = 'fu
   }
 
   if (source === 'live' && SERVER_ENABLE_SCHEDULED_INGEST) {
-    recordSnapshots(games)
+    try {
+      recordSnapshots(games)
+    } catch (error) {
+      console.error(`[game-page] Failed to record live snapshot for ${universeId}`, error)
+    }
   }
 
-  appendTrackedUniverseIds([universeId], TRACKED_UNIVERSE_CAP)
+  let trackedUniverseIds = []
+  try {
+    trackedUniverseIds = appendTrackedUniverseIds([universeId], TRACKED_UNIVERSE_CAP)
+  } catch (error) {
+    console.error(`[game-page] Failed to append tracked universe ${universeId}`, error)
 
-  const trackedUniverseIds = getTrackedUniverseIds()
-  const historyMap = getHistoryMap([universeId], getHistoryCutoffIso())
-  const peerGames = getLatestSnapshotGames(trackedUniverseIds)
+    try {
+      trackedUniverseIds = getTrackedUniverseIds()
+    } catch (trackedError) {
+      console.error('[game-page] Failed to read tracked universe ids after append failure', trackedError)
+      trackedUniverseIds = []
+    }
+  }
+
+  let historyMap = new Map()
+  try {
+    historyMap = getHistoryMap([universeId], getHistoryCutoffIso())
+  } catch (error) {
+    console.error(`[game-page] Failed to read history for ${universeId}`, error)
+  }
+
+  let peerGames = []
+  try {
+    peerGames = getLatestSnapshotGames(trackedUniverseIds)
+  } catch (error) {
+    console.error(`[game-page] Failed to read peer games for ${universeId}`, error)
+  }
   const supplemental = await fetchGameSupplementalData(games[0], {
     allowNetwork: detailLevel === 'full',
   })
@@ -3869,9 +3926,13 @@ async function fetchGamePagePayload(universeId, range = '24h', detailLevel = 'fu
   )
 
   if (detailLevel === 'full') {
-    recordGamePageSnapshot(payload, {
-      source: `game_page_${source}`,
-    })
+    try {
+      recordGamePageSnapshot(payload, {
+        source: `game_page_${source}`,
+      })
+    } catch (error) {
+      console.error(`[game-page] Failed to persist page snapshot for ${universeId}`, error)
+    }
   }
 
   writeCache(
