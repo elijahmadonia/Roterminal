@@ -42,6 +42,12 @@ function parseArgs(argv) {
   return args
 }
 
+const RANGE_MS = {
+  '24h': 24 * 60 * 60 * 1000,
+  '7d': 7 * 24 * 60 * 60 * 1000,
+  '30d': 30 * 24 * 60 * 60 * 1000,
+}
+
 function printUsage() {
   console.log(`Usage:
   node server/scripts/clean-platform-history.mjs [--url https://www.roterminal.co] [--token <token>] [--range 24h] [--min-value 10000000] [--apply]`)
@@ -61,7 +67,7 @@ async function fetchPlatformTimeline(url, range) {
   return Array.isArray(payload?.timeline) ? payload.timeline : []
 }
 
-async function deletePlatformPoints(url, token, timestamps) {
+async function deletePlatformPointsByThreshold(url, token, minValue, afterTimestamp) {
   const response = await fetch(`${url.replace(/\/$/, '')}/api/admin/import-history`, {
     method: 'POST',
     headers: {
@@ -69,7 +75,8 @@ async function deletePlatformPoints(url, token, timestamps) {
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      deletePlatformHistoryTimestamps: timestamps,
+      deletePlatformHistoryBelowValue: minValue,
+      deletePlatformHistoryAfter: afterTimestamp,
     }),
   })
 
@@ -115,10 +122,14 @@ if (!args.token) {
   throw new Error('Missing ROTERMINAL_IMPORT_TOKEN for cleanup apply mode.')
 }
 
-const result = await deletePlatformPoints(
+const afterTimestamp = new Date(
+  Date.now() - (RANGE_MS[args.range] ?? RANGE_MS['24h']),
+).toISOString()
+const result = await deletePlatformPointsByThreshold(
   args.url,
   args.token,
-  suspectPoints.map((point) => point.timestamp),
+  args.minValue,
+  afterTimestamp,
 )
 
 console.log('Cleanup complete.', result)

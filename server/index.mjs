@@ -5011,17 +5011,36 @@ const server = createServer(async (request, response) => {
       const platformHistoryPoints = Array.isArray(payload?.platformHistoryPoints)
         ? payload.platformHistoryPoints
         : []
-      const deletePlatformHistoryTimestamps = Array.isArray(payload?.deletePlatformHistoryTimestamps)
+      const requestedDeletePlatformHistoryTimestamps = Array.isArray(payload?.deletePlatformHistoryTimestamps)
         ? payload.deletePlatformHistoryTimestamps
         : []
+      const deletePlatformHistoryBelowValue = Number.isFinite(
+        Number(payload?.deletePlatformHistoryBelowValue),
+      )
+        ? Number(payload.deletePlatformHistoryBelowValue)
+        : null
+      const deletePlatformHistoryAfter =
+        typeof payload?.deletePlatformHistoryAfter === 'string' && payload.deletePlatformHistoryAfter.length > 0
+          ? payload.deletePlatformHistoryAfter
+          : null
       const platformDefaultSource =
         typeof payload?.platformDefaultSource === 'string' && payload.platformDefaultSource.length > 0
           ? payload.platformDefaultSource
           : 'history_import'
+      const derivedDeletePlatformHistoryTimestamps =
+        deletePlatformHistoryBelowValue == null
+          ? []
+          : (await getPlatformHistoryPoints(deletePlatformHistoryAfter)).filter(
+              (point) => Number(point?.value) < deletePlatformHistoryBelowValue,
+            ).map((point) => point.timestamp)
+      const deletePlatformHistoryTimestamps = [
+        ...requestedDeletePlatformHistoryTimestamps,
+        ...derivedDeletePlatformHistoryTimestamps,
+      ]
 
       if (platformHistoryPoints.length === 0 && deletePlatformHistoryTimestamps.length === 0) {
         return sendJson(response, 400, {
-          error: 'Missing platformHistoryPoints or deletePlatformHistoryTimestamps.',
+          error: 'Missing platformHistoryPoints, deletePlatformHistoryTimestamps, or deletePlatformHistoryBelowValue.',
         })
       }
 
@@ -5043,6 +5062,8 @@ const server = createServer(async (request, response) => {
         ok: true,
         importedPlatformHistoryPoints,
         deletedPlatformHistoryPoints,
+        deletePlatformHistoryBelowValue,
+        deletePlatformHistoryAfter,
         platformDefaultSource,
       })
     }
