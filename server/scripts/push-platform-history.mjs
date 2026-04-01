@@ -13,7 +13,7 @@ const RANGE_MS = {
 
 function parseArgs(argv) {
   const args = {
-    url: '',
+    url: process.env.ROTERMINAL_IMPORT_URL ?? 'https://www.roterminal.co',
     token: process.env.ROTERMINAL_IMPORT_TOKEN ?? '',
     range: '30d',
     batchSize: 1000,
@@ -79,7 +79,7 @@ function parseArgs(argv) {
 
 function printUsage() {
   console.log(`Usage:
-  node server/scripts/push-platform-history.mjs --url https://www.roterminal.co --token <token> [--range 30d] [--batch-size 1000] [--start-index 0] [--retry-count 20] [--retry-delay-ms 5000] [--source local_platform_sync]`)
+  node server/scripts/push-platform-history.mjs [--url https://www.roterminal.co] [--token <token>] [--range 30d] [--batch-size 1000] [--start-index 0] [--retry-count 20] [--retry-delay-ms 5000] [--source local_platform_sync]`)
 }
 
 function buildWindow(range) {

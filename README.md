@@ -82,6 +82,8 @@ The backend can be tuned with `.env`:
 - `ROTERMINAL_INGEST_STALE_AFTER_MS`: marks ingest unhealthy if no successful run lands within this window, default `max(interval x 3, 20m)`
 - `ROTERMINAL_SNAPSHOT_RETENTION_DAYS`: local history retention window, default `30`
 - `ROTERMINAL_REQUEST_TIMEOUT_MS`: upstream Roblox request timeout, default `8000`
+- `ROTERMINAL_IMPORT_TOKEN`: shared bearer token that authorizes `/api/admin/import-history`
+- `ROTERMINAL_IMPORT_URL`: target import base URL for local collector scripts, default `https://www.roterminal.co`
 - `ROBLOX_SECURITY_COOKIE`: optional single `.ROBLOSECURITY` cookie for one Roblox seed account
 - `ROBLOX_SECURITY_COOKIES`: optional newline-separated `.ROBLOSECURITY` cookies for multiple Roblox seed accounts
 
@@ -97,6 +99,34 @@ The current production-safe deployment path is a single always-on backend servic
 4. Use `/health` for the Render deployment health check. Keep `/ready` for operational checks that include ingest freshness.
 
 This is the right move for now because the app currently uses SQLite. Splitting API and worker into separate services requires moving the warehouse to a network database like Postgres first. Until then, one always-on service plus persistent disk is the correct "legit" setup.
+
+## Platform collector
+
+Render’s web service can be blocked by Cloudflare on the third-party full-platform CCU endpoint. The production-safe workaround is to import platform history from a machine that can reach the provider, then let the API serve that stored history from Postgres.
+
+1. Set the same `ROTERMINAL_IMPORT_TOKEN` in the Render web service and in your local `.env`.
+2. Optionally set `ROTERMINAL_IMPORT_URL` locally if you want to push somewhere other than `https://www.roterminal.co`.
+3. Run a one-off sync or backfill from your Mac:
+
+```bash
+npm run sync:platform-history -- --range 24h --source mac_platform_sync
+```
+
+4. Install the recurring macOS collector:
+
+```bash
+npm run install:platform-collector
+```
+
+The launch agent runs every 5 minutes, loads `.env` from the repo, and writes logs to `~/Library/Logs/com.roterminal.platform-collector.out.log` and `~/Library/Logs/com.roterminal.platform-collector.err.log`.
+
+To remove it later:
+
+```bash
+npm run remove:platform-collector
+```
+
+On production, keep `ROTERMINAL_ALLOW_LIVE_READ_FALLBACK=false` so the API prefers imported platform history instead of repeatedly hitting the blocked provider from Render.
 
 ## Next scale steps
 

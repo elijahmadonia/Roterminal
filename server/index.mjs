@@ -2,7 +2,9 @@ import { createServer } from 'node:http'
 import { access, readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { gunzipSync } from 'node:zlib'
 import {
+  ALLOW_LIVE_READ_FALLBACK,
   BOARD_CACHE_TTL_MS,
   DATA_BACKEND,
   DB_PATH,
@@ -20,6 +22,7 @@ import {
   PORT,
   POSTGRES_URL,
   ROBLOX_SECURITY_COOKIES,
+  IMPORT_TOKEN,
   RENDER_SERVICE_TYPE,
   REQUEST_TIMEOUT_MS,
   RETRY_BASE_DELAY_MS,
@@ -569,6 +572,34 @@ function sendJson(response, statusCode, payload) {
   response.end(JSON.stringify(payload))
 }
 
+async function readRequestBody(request, maxBytes = 5 * 1024 * 1024) {
+  const chunks = []
+  let totalBytes = 0
+
+  for await (const chunk of request) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+    totalBytes += buffer.length
+
+    if (totalBytes > maxBytes) {
+      const error = new Error('Request body too large.')
+      error.statusCode = 413
+      throw error
+    }
+
+    chunks.push(buffer)
+  }
+
+  return Buffer.concat(chunks)
+}
+
+function isAuthorizedImportRequest(request) {
+  if (!IMPORT_TOKEN) {
+    return false
+  }
+
+  return request.headers.authorization === `Bearer ${IMPORT_TOKEN}`
+}
+
 function sleep(ms) {
   return new Promise((resolve) => {
     setTimeout(resolve, ms)
@@ -792,6 +823,10 @@ function writeCache(cache, key, value, ttlMs) {
     value,
     expiresAt: Date.now() + ttlMs,
   })
+}
+
+function resetPlatformStatsCaches() {
+  platformStatsCache.clear()
 }
 
 function chunkItems(items, size) {
@@ -2676,6 +2711,20 @@ function buildStoredPlatformStatsPayload(
   }
 }
 
+async function loadStoredPlatformStatsPayload(range = '24h', source = 'stored_history') {
+  const { startDatetime } = buildPlatformStatsWindow(range)
+  const [storedPoint, storedHistory] = await Promise.all([
+    getPlatformCurrentMetric(),
+    getPlatformHistoryPoints(startDatetime),
+  ])
+
+  if ((storedHistory?.length ?? 0) === 0 && !storedPoint?.timestamp) {
+    return null
+  }
+
+  return buildStoredPlatformStatsPayload(storedHistory, storedPoint, range, source)
+}
+
 async function fetchFullPlatformStats(range = '24h') {
   const cachedStats = readCache(platformStatsCache, range)
 
@@ -2683,6 +2732,18 @@ async function fetchFullPlatformStats(range = '24h') {
     lastPlatformStatsFetchRange = range
     lastPlatformStatsResolvedSource = cachedStats.source ?? cachedStats.latest?.source ?? 'cache_hit'
     return cachedStats
+  }
+
+  if (!ALLOW_LIVE_READ_FALLBACK) {
+    const storedPayload = await loadStoredPlatformStatsPayload(range, 'stored_history')
+
+    if (storedPayload) {
+      writeCache(platformStatsCache, range, storedPayload, getPlatformStatsCacheTtlMs(range))
+      lastPlatformStatsFetchRange = range
+      lastPlatformStatsFetchError = null
+      lastPlatformStatsResolvedSource = storedPayload.source
+      return storedPayload
+    }
   }
 
   const staleStats = readCacheEntry(platformStatsCache, range)
@@ -2741,22 +2802,15 @@ async function fetchFullPlatformStats(range = '24h') {
       return stalePayload
     }
 
-    const [storedPoint, storedHistory] = await Promise.all([
-      getPlatformCurrentMetric(),
-      getPlatformHistoryPoints(startDatetime),
-    ])
+    const storedPayload = await loadStoredPlatformStatsPayload(range, 'stored_history')
 
-    if ((storedHistory?.length ?? 0) > 0 || storedPoint?.timestamp) {
-      const storedPayload = buildStoredPlatformStatsPayload(
-        storedHistory,
-        storedPoint,
-        range,
-        'stored_history',
-      )
+    if (storedPayload) {
       writeCache(platformStatsCache, range, storedPayload, getPlatformStatsCacheTtlMs(range))
       lastPlatformStatsResolvedSource = storedPayload.source
       return storedPayload
     }
+
+    const storedPoint = await getPlatformCurrentMetric()
 
     const storedBoard =
       (await getBoardSnapshot('24h').catch(() => null)) ??
@@ -4651,6 +4705,7 @@ async function getOpsMetrics() {
       historyPoints24h: platformHistory24h.length,
       latestHistoryPoint: platformLatestHistoryPoint,
       liveFetch: {
+        enabled: ALLOW_LIVE_READ_FALLBACK,
         lastAttemptedAt: lastPlatformStatsFetchAttemptedAt,
         lastSucceededAt: lastPlatformStatsFetchSucceededAt,
         lastError: lastPlatformStatsFetchError,
@@ -4904,6 +4959,7 @@ const server = createServer(async (request, response) => {
         ok: true,
         backend: DATA_BACKEND,
         renderService: RENDER_SERVICE_TYPE || 'local',
+        platformLiveReadFallbackEnabled: ALLOW_LIVE_READ_FALLBACK,
         trackedUniverseCount,
         lastIngestedAt,
         lastIngestError,
@@ -4924,6 +4980,48 @@ const server = createServer(async (request, response) => {
 
     if (request.method === 'GET' && url.pathname === '/api/ops/metrics') {
       return sendJson(response, 200, await getOpsMetrics())
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/admin/import-history') {
+      if (!isAuthorizedImportRequest(request)) {
+        return sendJson(response, 401, { error: 'Unauthorized.' })
+      }
+
+      const rawBody = await readRequestBody(request)
+      const contentEncoding = String(request.headers['content-encoding'] ?? '').toLowerCase()
+      const decodedBody = contentEncoding === 'gzip' ? gunzipSync(rawBody) : rawBody
+      let payload
+
+      try {
+        payload = JSON.parse(decodedBody.toString('utf8'))
+      } catch {
+        return sendJson(response, 400, { error: 'Invalid JSON payload.' })
+      }
+
+      const platformHistoryPoints = Array.isArray(payload?.platformHistoryPoints)
+        ? payload.platformHistoryPoints
+        : []
+      const platformDefaultSource =
+        typeof payload?.platformDefaultSource === 'string' && payload.platformDefaultSource.length > 0
+          ? payload.platformDefaultSource
+          : 'history_import'
+
+      if (platformHistoryPoints.length === 0) {
+        return sendJson(response, 400, { error: 'Missing platformHistoryPoints.' })
+      }
+
+      const importedPlatformHistoryPoints = await recordPlatformHistoryPoints(
+        platformHistoryPoints,
+        platformDefaultSource,
+      )
+
+      resetPlatformStatsCaches()
+
+      return sendJson(response, 200, {
+        ok: true,
+        importedPlatformHistoryPoints,
+        platformDefaultSource,
+      })
     }
 
     if (request.method === 'GET' && url.pathname === '/api/search') {
