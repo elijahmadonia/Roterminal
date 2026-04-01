@@ -4,6 +4,7 @@ import { createDatabase } from '../lib/database.mjs'
 import {
   importEmbeddedHistoryHtmlFile,
   importExternalHistoryJsonFile,
+  importRolimonsPublicHistory,
   importRbxTrackerHistory,
 } from '../lib/external-history.mjs'
 import { TRACKED_UNIVERSE_CAP, DB_PATH } from '../config.mjs'
@@ -77,6 +78,7 @@ function parseArgs(argv) {
 function printUsage() {
   console.log(`Usage:
   node server/scripts/import-external-history.mjs --source rbx-tracker [--hours 168] [--universe 123] [--promote-tracked] [--tracked-limit 10000]
+  node server/scripts/import-external-history.mjs --source rolimons-public --universe 123 [--universe 456] [--promote-tracked] [--tracked-limit 10000]
   node server/scripts/import-external-history.mjs --source embedded-html --file ./page.html [--source-key embedded_html_import] [--display-name "Embedded HTML import"] [--promote-tracked]
   node server/scripts/import-external-history.mjs --source json-file --file ./history.json [--source-key licensed_dump] [--display-name "Licensed dump"] [--promote-tracked]`)
 }
@@ -98,6 +100,12 @@ try {
       apiKey: process.env.RBX_TRACKER_API_KEY ?? '',
       universeIds: args.universeIds,
       hours: args.hours,
+      database,
+      trigger: 'script',
+    })
+  } else if (args.source === 'rolimons-public') {
+    result = await importRolimonsPublicHistory({
+      universeIds: args.universeIds,
       database,
       trigger: 'script',
     })

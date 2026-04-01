@@ -1,6 +1,13 @@
 import { readFile } from 'node:fs/promises'
 
 const RBX_TRACKER_BASE_URL = 'https://rbxstats.newstargeted.com/api/v1'
+const ROLIMONS_BASE_URL = 'https://www.rolimons.com/game'
+
+function sleep(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms)
+  })
+}
 
 function normalizeUniverseIds(universeIds) {
   return [...new Set((universeIds ?? []).map((value) => Number(value)).filter((value) => Number.isFinite(value) && value > 0))]
@@ -20,6 +27,56 @@ async function fetchJson(url, { headers = {}, signal } = {}) {
   }
 
   return response.json()
+}
+
+async function fetchText(url, { headers = {}, signal } = {}) {
+  const response = await fetch(url, {
+    headers,
+    signal,
+  })
+
+  if (!response.ok) {
+    const message = await response.text().catch(() => '')
+    const error = new Error(`Request failed: ${response.status} ${response.statusText}${message ? ` - ${message.slice(0, 240)}` : ''}`)
+    error.statusCode = response.status
+    throw error
+  }
+
+  return response.text()
+}
+
+async function fetchRobloxPlaceMap(universeIds) {
+  const normalizedUniverseIds = normalizeUniverseIds(universeIds)
+
+  if (normalizedUniverseIds.length === 0) {
+    return new Map()
+  }
+
+  const response = await fetchJson(
+    `https://games.roblox.com/v1/games?universeIds=${normalizedUniverseIds.join(',')}`,
+    {
+      headers: {
+        Accept: 'application/json',
+      },
+    },
+  )
+  const map = new Map()
+
+  for (const game of response.data ?? []) {
+    if (!game?.id || !game?.rootPlaceId) {
+      continue
+    }
+
+    map.set(Number(game.id), {
+      rootPlaceId: Number(game.rootPlaceId),
+      name: game.name ?? null,
+      creatorName: game.creator?.name ?? null,
+      creatorType: game.creator?.type ?? null,
+      genre: game.genre ?? null,
+    })
+  }
+
+  return map
 }
 
 function toApproval(upVotes, downVotes, approval) {
@@ -190,14 +247,108 @@ function extractEmbeddedJsonObject(html, variableName) {
     throw new Error(`Could not find ${variableName} in HTML.`)
   }
 
-  const jsonStart = start + marker.length
-  const end = html.indexOf(';</script>', jsonStart)
+  const objectStart = html.indexOf('{', start + marker.length)
 
-  if (end === -1) {
-    throw new Error(`Could not determine end of ${variableName} JSON block.`)
+  if (objectStart === -1) {
+    throw new Error(`Could not find opening brace for ${variableName}.`)
   }
 
-  return JSON.parse(html.slice(jsonStart, end))
+  let depth = 0
+  let inString = false
+  let isEscaped = false
+
+  for (let index = objectStart; index < html.length; index += 1) {
+    const char = html[index]
+
+    if (inString) {
+      if (isEscaped) {
+        isEscaped = false
+        continue
+      }
+
+      if (char === '\\') {
+        isEscaped = true
+        continue
+      }
+
+      if (char === '"') {
+        inString = false
+      }
+
+      continue
+    }
+
+    if (char === '"') {
+      inString = true
+      continue
+    }
+
+    if (char === '{') {
+      depth += 1
+    } else if (char === '}') {
+      depth -= 1
+
+      if (depth === 0) {
+        return JSON.parse(html.slice(objectStart, index + 1))
+      }
+    }
+  }
+
+  throw new Error(`Could not determine end of ${variableName} JSON block.`)
+}
+
+function parseRolimonsMeta(html, universeId) {
+  const titleMatch = html.match(/<title>([^<]+)\s+\|\s+Roblox Game - Rolimon's<\/title>/i)
+  const descriptionMatch = html.match(
+    /<meta\s+name="description"\s+content="([^"]+)"/i,
+  )
+
+  const title = titleMatch?.[1]?.trim() || `Universe ${universeId}`
+  const description = descriptionMatch?.[1] ?? ''
+  const detailMatch = description.match(/is a Roblox\s+(.+?)\s+game by\s+(.+?)\./i)
+
+  return {
+    name: title,
+    genre: detailMatch?.[1]?.trim() ?? 'Unclassified',
+    creatorName: detailMatch?.[2]?.trim() ?? 'Unknown creator',
+    creatorType: 'Unknown',
+  }
+}
+
+function parseRolimonsHistoryHtml(html, universeId) {
+  const gameHistory = extractEmbeddedJsonObject(html, 'game_history')
+  const meta = parseRolimonsMeta(html, universeId)
+
+  return (gameHistory.timestamps ?? []).map((timestamp, index) => {
+    const upVotes = gameHistory.upvotes?.[index] ?? null
+    const downVotes = gameHistory.downvotes?.[index] ?? null
+
+    return {
+      universeId,
+      observedAt: new Date(Number(timestamp) * 1000).toISOString(),
+      playing: Number(gameHistory.players?.[index]) || 0,
+      visits: gameHistory.visits?.[index] == null ? null : Number(gameHistory.visits[index]),
+      favoritedCount:
+        gameHistory.favorites?.[index] == null ? null : Number(gameHistory.favorites[index]),
+      upVotes: upVotes == null ? null : Number(upVotes),
+      downVotes: downVotes == null ? null : Number(downVotes),
+      approval: toApproval(upVotes, downVotes, null),
+      name: meta.name,
+      creatorName: meta.creatorName,
+      creatorType: meta.creatorType,
+      genre: meta.genre,
+      updated: new Date(Number(timestamp) * 1000).toISOString(),
+      payload: {
+        source: 'rolimons_public_page',
+        timestamp,
+        players: gameHistory.players?.[index] ?? null,
+        visits: gameHistory.visits?.[index] ?? null,
+        favorites: gameHistory.favorites?.[index] ?? null,
+        upvotes: upVotes,
+        downvotes: downVotes,
+      },
+    }
+  })
 }
 
 export async function importEmbeddedHistoryHtmlFile({
@@ -219,7 +370,6 @@ export async function importEmbeddedHistoryHtmlFile({
 
   try {
     const html = await readFile(filePath, 'utf8')
-    const gameHistory = extractEmbeddedJsonObject(html, 'game_history')
     const urlMatch = html.match(/canonical" href="https:\/\/www\.rolimons\.com\/game\/(\d+)"/i)
     const universeId = Number(urlMatch?.[1])
 
@@ -227,30 +377,7 @@ export async function importEmbeddedHistoryHtmlFile({
       throw new Error('Could not extract universe ID from HTML canonical URL.')
     }
 
-    const observations = (gameHistory.timestamps ?? []).map((timestamp, index) => {
-      const upVotes = gameHistory.upvotes?.[index] ?? null
-      const downVotes = gameHistory.downvotes?.[index] ?? null
-
-      return {
-        universeId,
-        observedAt: new Date(Number(timestamp) * 1000).toISOString(),
-        playing: Number(gameHistory.players?.[index]) || 0,
-        visits: gameHistory.visits?.[index] == null ? null : Number(gameHistory.visits[index]),
-        favoritedCount:
-          gameHistory.favorites?.[index] == null ? null : Number(gameHistory.favorites[index]),
-        upVotes: upVotes == null ? null : Number(upVotes),
-        downVotes: downVotes == null ? null : Number(downVotes),
-        approval: toApproval(upVotes, downVotes, null),
-        payload: {
-          timestamp,
-          players: gameHistory.players?.[index] ?? null,
-          visits: gameHistory.visits?.[index] ?? null,
-          favorites: gameHistory.favorites?.[index] ?? null,
-          upvotes: upVotes,
-          downvotes: downVotes,
-        },
-      }
-    })
+    const observations = parseRolimonsHistoryHtml(html, universeId)
 
     const result = database.recordExternalHistory(sourceKey, observations, {
       displayName,
@@ -268,6 +395,97 @@ export async function importEmbeddedHistoryHtmlFile({
     return {
       sourceKey,
       ...result,
+    }
+  } catch (error) {
+    database.finishExternalHistoryImportRun(importRunId, {
+      status: 'failed',
+      errorMessage: error instanceof Error ? error.message : String(error),
+    })
+    throw error
+  }
+}
+
+export async function importRolimonsPublicHistory({
+  universeIds = [],
+  database,
+  trigger = 'manual',
+  minDelayMs = 2_200,
+} = {}) {
+  if (!database) {
+    throw new Error('Database handle is required.')
+  }
+
+  const normalizedUniverseIds = normalizeUniverseIds(universeIds)
+
+  if (normalizedUniverseIds.length === 0) {
+    throw new Error('At least one universe ID is required.')
+  }
+
+  const sourceKey = 'rolimons_public_page'
+  const importRunId = database.startExternalHistoryImportRun(sourceKey, trigger)
+
+  try {
+    const localPlaceMap =
+      typeof database.getUniverseRootPlaceMap === 'function'
+        ? database.getUniverseRootPlaceMap(normalizedUniverseIds)
+        : new Map()
+    const unresolvedUniverseIds = normalizedUniverseIds.filter((universeId) => !localPlaceMap.has(universeId))
+    const remotePlaceMap =
+      unresolvedUniverseIds.length > 0
+        ? await fetchRobloxPlaceMap(unresolvedUniverseIds)
+        : new Map()
+    const placeMap = new Map([...localPlaceMap.entries(), ...remotePlaceMap.entries()])
+    const allObservations = []
+    const failedUniverseIds = []
+
+    for (const [index, universeId] of normalizedUniverseIds.entries()) {
+      try {
+        const mapping = placeMap.get(universeId)
+        const placeId = mapping?.rootPlaceId ?? universeId
+        const html = await fetchText(`${ROLIMONS_BASE_URL}/${placeId}`, {
+          headers: {
+            'User-Agent': 'RoterminalBot/1.0 (+https://localhost/roterminal)',
+            Accept: 'text/html,application/xhtml+xml',
+          },
+        })
+        const observations = parseRolimonsHistoryHtml(html, universeId)
+        for (const observation of observations) {
+          observation.name = observation.name || mapping?.name || `Universe ${universeId}`
+          observation.creatorName = observation.creatorName || mapping?.creatorName || 'Unknown creator'
+          observation.creatorType = observation.creatorType || mapping?.creatorType || 'Unknown'
+          observation.genre = observation.genre || mapping?.genre || 'Unclassified'
+        }
+        allObservations.push(...observations)
+      } catch {
+        failedUniverseIds.push(universeId)
+      }
+
+      if (index < normalizedUniverseIds.length - 1 && minDelayMs > 0) {
+        await sleep(minDelayMs)
+      }
+    }
+
+    if (allObservations.length === 0) {
+      throw new Error('No Rolimon’s history pages were imported successfully.')
+    }
+
+    const result = database.recordExternalHistory(sourceKey, allObservations, {
+      displayName: "Rolimon's public pages",
+      kind: 'public_html',
+      status: 'active',
+      notes: 'Imported from public Rolimon’s game pages with embedded history data.',
+    })
+
+    database.finishExternalHistoryImportRun(importRunId, {
+      status: 'completed',
+      universeCount: result.universeCount,
+      observationCount: result.observationCount,
+    })
+
+    return {
+      sourceKey,
+      ...result,
+      failedUniverseIds,
     }
   } catch (error) {
     database.finishExternalHistoryImportRun(importRunId, {

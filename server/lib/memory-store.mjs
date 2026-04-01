@@ -83,8 +83,28 @@ function clonePoint(point) {
   return point == null ? null : { ...point }
 }
 
+function buildDefaultTrackedRecord(universeId, sortOrder = 0) {
+  const nowIso = new Date().toISOString()
+  return {
+    universeId,
+    sortOrder,
+    trackingTier: 'tier_d',
+    pollIntervalMinutes: 60,
+    priorityScore: 0,
+    lastKnownPlaying: 0,
+    discoverySource: 'manual',
+    firstDiscoveredAt: nowIso,
+    lastDiscoveredAt: nowIso,
+    lastPromotedAt: null,
+    lastPolledAt: null,
+    manuallyPinned: false,
+  }
+}
+
 export async function createMemoryStore() {
-  let trackedUniverseIds = [...DEFAULT_TRACKED_IDS]
+  let trackedUniverseRecords = DEFAULT_TRACKED_IDS.map((universeId, index) =>
+    buildDefaultTrackedRecord(universeId, index),
+  )
   const catalogByUniverseId = new Map()
   const currentMetricsByUniverseId = new Map()
   const observationHistoryByUniverseId = new Map()
@@ -97,15 +117,22 @@ export async function createMemoryStore() {
   let nextIngestRunId = 1
 
   function countTrackedUniverseIds() {
-    return trackedUniverseIds.length
+    return trackedUniverseRecords.length
   }
 
   function getTrackedUniverseIds() {
-    return [...trackedUniverseIds]
+    return trackedUniverseRecords.map((record) => record.universeId)
   }
 
   function replaceTrackedUniverseIds(universeIds) {
-    trackedUniverseIds = sanitizeUniverseIds(universeIds)
+    const existingByUniverseId = new Map(
+      trackedUniverseRecords.map((record) => [record.universeId, record]),
+    )
+    trackedUniverseRecords = sanitizeUniverseIds(universeIds).map((universeId, index) => ({
+      ...(existingByUniverseId.get(universeId) ?? buildDefaultTrackedRecord(universeId, index)),
+      universeId,
+      sortOrder: index,
+    }))
   }
 
   function appendTrackedUniverseIds(universeIds, maxCount = Number.POSITIVE_INFINITY) {
@@ -115,15 +142,57 @@ export async function createMemoryStore() {
       return getTrackedUniverseIds()
     }
 
+    const existingByUniverseId = new Map(
+      trackedUniverseRecords.map((record) => [record.universeId, record]),
+    )
     const dedupedIds = [
-      ...trackedUniverseIds.filter((universeId) => !incomingIds.includes(universeId)),
+      ...trackedUniverseRecords
+        .map((record) => record.universeId)
+        .filter((universeId) => !incomingIds.includes(universeId)),
       ...incomingIds,
     ]
-    trackedUniverseIds = Number.isFinite(maxCount)
+    const limitedIds = Number.isFinite(maxCount)
       ? dedupedIds.slice(-Math.max(Math.floor(maxCount), 1))
       : dedupedIds
 
+    trackedUniverseRecords = limitedIds.map((universeId, index) => ({
+      ...(existingByUniverseId.get(universeId) ?? buildDefaultTrackedRecord(universeId, index)),
+      universeId,
+      sortOrder: index,
+    }))
+
     return getTrackedUniverseIds()
+  }
+
+  function getTrackedUniverseRecords() {
+    return trackedUniverseRecords.map((record) => ({ ...record }))
+  }
+
+  function replaceTrackedUniverseRecords(records) {
+    trackedUniverseRecords = sanitizeUniverseIds(records.map((record) => record?.universeId))
+      .map((universeId, index) => {
+        const record = records.find((entry) => Number(entry?.universeId) === universeId)
+        return {
+          ...(record ?? buildDefaultTrackedRecord(universeId, index)),
+          universeId,
+          sortOrder: Number.isFinite(record?.sortOrder) ? Number(record.sortOrder) : index,
+        }
+      })
+    return getTrackedUniverseIds()
+  }
+
+  function getTrackedTierCounts() {
+    return trackedUniverseRecords.reduce((counts, record) => {
+      counts[record.trackingTier] = (counts[record.trackingTier] ?? 0) + 1
+      return counts
+    }, {})
+  }
+
+  function getTrackedDiscoverySourceCounts() {
+    return trackedUniverseRecords.reduce((counts, record) => {
+      counts[record.discoverySource] = (counts[record.discoverySource] ?? 0) + 1
+      return counts
+    }, {})
   }
 
   function upsertCatalog(universeId, nextCatalogEntry) {
@@ -614,6 +683,9 @@ export async function createMemoryStore() {
     getLatestSnapshotGames,
     getPlatformCurrentMetric,
     getPlatformHistoryPoints,
+    getTrackedDiscoverySourceCounts,
+    getTrackedTierCounts,
+    getTrackedUniverseRecords,
     getTrackedUniverseIds,
     importLegacySnapshot,
     recordGamePageSnapshot,
@@ -621,6 +693,7 @@ export async function createMemoryStore() {
     recordPlatformHistoryPoints,
     recordSnapshots,
     recoverStaleIngestRuns,
+    replaceTrackedUniverseRecords,
     replaceTrackedUniverseIds,
     searchLocalGames,
     startIngestRun,

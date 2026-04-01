@@ -3,9 +3,7 @@ import { access, readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import {
-  ALLOW_LIVE_READ_FALLBACK,
   BOARD_CACHE_TTL_MS,
-  DATA_BACKEND,
   DB_PATH,
   DEFAULT_TRACKED_IDS,
   DIST_DIR,
@@ -26,10 +24,17 @@ import {
   SERVER_ENABLE_SCHEDULED_INGEST,
   SNAPSHOT_RETENTION_MS,
   TRACKED_UNIVERSE_CAP,
+  TRACKING_FAST_LANE_CCU,
+  TRACKING_PRIORITY_CCU,
+  TRACKING_WARM_CCU,
+  TIER_A_POLL_MINUTES,
+  TIER_B_POLL_MINUTES,
+  TIER_C_POLL_MINUTES,
+  TIER_D_POLL_MINUTES,
   UNIVERSE_FETCH_BATCH_CONCURRENCY,
 } from './config.mjs'
 import { migrateLegacyJsonIfNeeded } from './lib/bootstrap.mjs'
-import { createStore } from './lib/store.mjs'
+import { createDatabase } from './lib/database.mjs'
 
 const SIX_HOURS_MS = 6 * ONE_HOUR_MS
 const THIRTY_MINUTES_MS = 30 * 60 * 1000
@@ -44,33 +49,57 @@ const CHART_RANGE_MS = {
   '30d': THIRTY_DAYS_MS,
 }
 const GAME_ICON_CACHE_TTL_MS = 5 * 60 * 1000
-const GAME_PAGE_CORE_CACHE_TTL_MS = 60 * 1000
-const GAME_PAGE_FULL_CACHE_TTL_MS = 5 * 60 * 1000
-const GAME_LIVE_POINT_CACHE_TTL_MS = 2_000
-const CACHE_SWEEP_INTERVAL_MS = 60 * 1000
-const HOME_RECOMMENDATION_COOLDOWN_MS = 10 * 60 * 1000
 
-const LIVE_DISCOVERY_CACHE_TTL_MS = PLATFORM_CACHE_TTL_MS
+const LIVE_DISCOVERY_CACHE_TTL_MS = Math.min(PLATFORM_CACHE_TTL_MS, 5_000)
 
 function getPlatformStatsCacheTtlMs(range) {
-  return PLATFORM_CACHE_TTL_MS
+  switch (range) {
+    case '30m':
+    case '1h':
+    case '24h':
+      return Math.min(PLATFORM_CACHE_TTL_MS, 5_000)
+    case '6h':
+      return Math.min(PLATFORM_CACHE_TTL_MS, 10_000)
+    case '7d':
+      return Math.min(PLATFORM_CACHE_TTL_MS, 20_000)
+    case '30d':
+      return Math.min(PLATFORM_CACHE_TTL_MS, 30_000)
+    default:
+      return Math.min(PLATFORM_CACHE_TTL_MS, 15_000)
+  }
 }
 
 function getBoardPayloadCacheTtlMs(range) {
-  return BOARD_CACHE_TTL_MS
+  switch (range) {
+    case '30m':
+    case '1h':
+    case '24h':
+      return Math.min(BOARD_CACHE_TTL_MS, 5_000)
+    case '6h':
+      return Math.min(BOARD_CACHE_TTL_MS, 10_000)
+    case '7d':
+      return Math.min(BOARD_CACHE_TTL_MS, 20_000)
+    case '30d':
+      return Math.min(BOARD_CACHE_TTL_MS, 30_000)
+    default:
+      return Math.min(BOARD_CACHE_TTL_MS, 15_000)
+  }
 }
 
 function getGamePagePayloadCacheTtlMs(range, detailLevel = 'full') {
+  const baseTtlMs = getBoardPayloadCacheTtlMs(range)
+
   if (detailLevel === 'core') {
-    return GAME_PAGE_CORE_CACHE_TTL_MS
+    return Math.min(baseTtlMs, 5_000)
   }
 
-  return GAME_PAGE_FULL_CACHE_TTL_MS
+  return Math.min(baseTtlMs, 15_000)
 }
 const OFFICIAL_PLATFORM_SCALE = {
   value: '45M',
   dateLabel: 'Jan 13, 2026',
 }
+const FULL_PLATFORM_STATS_URL = 'https://portal-api.bloxbiz.com/games/platform_stats'
 const PLATFORM_SORT_IDS = [
   'top-playing-now',
   'top-trending',
@@ -80,12 +109,10 @@ const PLATFORM_SORT_IDS = [
 const PLATFORM_GAME_BATCH_SIZE = 50
 const SCREENER_RESULT_LIMIT = 15
 const SCREENER_SEARCH_LIMIT = 24
-const GAME_PAGE_SERVER_SAMPLE_MAX_PAGES = 4
+const GAME_PAGE_SERVER_SAMPLE_MAX_PAGES = 10
 const GAME_PAGE_SERVER_SAMPLE_LIMIT = 100
 const GAME_PAGE_CREATOR_PORTFOLIO_LIMIT = 8
 const GAME_PAGE_COMPARABLE_LIMIT = 8
-const GAME_PAGE_PEER_POOL_LIMIT = 120
-const STORE_SOURCE = DATA_BACKEND === 'memory' ? 'memory' : 'database'
 const SCREENER_STOPWORDS = new Set([
   'a',
   'about',
@@ -135,13 +162,6 @@ const boardCache = new Map()
 const gamePageCache = new Map()
 const gameSupplementalCache = new Map()
 const gameIconRedirectCache = new Map()
-const gameLivePointCache = new Map()
-const platformDiscoveryRequestCache = new Map()
-const platformStatsRequestCache = new Map()
-const boardRequestCache = new Map()
-const gamePageRequestCache = new Map()
-const gameSupplementalRequestCache = new Map()
-const gameLivePointRequestCache = new Map()
 let lastBoardUniverseIds = []
 const ROBLOX_AUTH_COOKIE_HEADERS = [...new Set(
   ROBLOX_SECURITY_COOKIES.map((cookieValue) =>
@@ -273,7 +293,6 @@ let lastHomeFetchSortCount = 0
 let lastHomeFetchUniverseCount = 0
 let lastHomeFetchSeedSuccessCount = 0
 let lastHomeFetchSeedFailureCount = 0
-let lastHomeFetchCooldownUntil = null
 const startedAt = Date.now()
 const schedulerOwnerId = `api-server:${process.pid}:${randomUUID()}`
 let scheduledIngestInFlight = false
@@ -282,21 +301,28 @@ function gameIconPath(universeId) {
   return `/api/game-icon/${universeId}`
 }
 
-const database = await createStore()
+const database = await createDatabase()
 const {
   appendTrackedUniverseIds,
   countCatalogEntries,
+  countDailyMetrics,
+  countDerivedHistory,
+  countExternalHistory,
+  countExternalImportRuns,
+  countMetadataHistory,
   countObservations,
+  countSnapshots,
   finishIngestRun,
   getActiveIngestLease,
   getHistoryMap,
   getLatestIngestRun,
   getLatestSnapshotGames,
   getPlatformCurrentMetric,
-  getPlatformHistoryPoints,
+  getTrackedDiscoverySourceCounts,
+  getTrackedTierCounts,
   getTrackedUniverseIds,
+  recordGamePageSnapshot,
   recordPlatformCurrentMetric,
-  recordPlatformHistoryPoints,
   recordSnapshots,
   recoverStaleIngestRuns,
   replaceTrackedUniverseIds,
@@ -305,11 +331,9 @@ const {
   tryAcquireIngestLease,
 } = database
 
-if (SERVER_ENABLE_SCHEDULED_INGEST) {
-  await recoverStaleIngestRuns()
-}
+recoverStaleIngestRuns()
 
-const startupIngestRun = await getLatestIngestRun()
+const startupIngestRun = getLatestIngestRun()
 if (startupIngestRun?.finished_at) {
   lastIngestedAt = startupIngestRun.finished_at
 }
@@ -487,119 +511,6 @@ function buildSecurityHeaders(extraHeaders = {}) {
   }
 }
 
-function bytesToMegabytes(bytes) {
-  return Math.round((bytes / (1024 * 1024)) * 10) / 10
-}
-
-function getMemoryUsageSnapshot() {
-  const usage = process.memoryUsage()
-
-  return {
-    rssMb: bytesToMegabytes(usage.rss),
-    heapTotalMb: bytesToMegabytes(usage.heapTotal),
-    heapUsedMb: bytesToMegabytes(usage.heapUsed),
-    externalMb: bytesToMegabytes(usage.external),
-    arrayBuffersMb: bytesToMegabytes(usage.arrayBuffers),
-  }
-}
-
-function serializeError(error) {
-  if (error instanceof Error) {
-    const payload = {
-      name: error.name,
-      message: error.message,
-      stack: error.stack,
-    }
-
-    if (typeof error.statusCode === 'number') {
-      payload.statusCode = error.statusCode
-    }
-
-    if (typeof error.code === 'string') {
-      payload.code = error.code
-    }
-
-    return payload
-  }
-
-  if (typeof error === 'string') {
-    return { message: error }
-  }
-
-  return {
-    message: 'Non-Error rejection',
-    value: String(error),
-  }
-}
-
-function logServerEvent(level, event, details = {}) {
-  const payload = {
-    ts: new Date().toISOString(),
-    level,
-    event,
-    dataBackend: DATA_BACKEND,
-    ...details,
-  }
-  const line = `[roterminal-server] ${JSON.stringify(payload)}`
-
-  if (level === 'error') {
-    console.error(line)
-    return
-  }
-
-  if (level === 'warn') {
-    console.warn(line)
-    return
-  }
-
-  console.log(line)
-}
-
-function shouldIncludeMemoryInRequestLog(pathname, statusCode, durationMs) {
-  return (
-    statusCode >= 500 ||
-    durationMs >= 1000 ||
-    pathname.startsWith('/api/live/') ||
-    pathname.startsWith('/api/game-page/')
-  )
-}
-
-process.on('warning', (warning) => {
-  logServerEvent('warn', 'process_warning', {
-    warning: serializeError(warning),
-    memory: getMemoryUsageSnapshot(),
-  })
-})
-
-process.on('unhandledRejection', (reason) => {
-  logServerEvent('error', 'unhandled_rejection', {
-    error: serializeError(reason),
-    memory: getMemoryUsageSnapshot(),
-  })
-})
-
-process.on('uncaughtExceptionMonitor', (error, origin) => {
-  logServerEvent('error', 'uncaught_exception', {
-    origin,
-    error: serializeError(error),
-    memory: getMemoryUsageSnapshot(),
-  })
-})
-
-process.on('SIGTERM', () => {
-  logServerEvent('warn', 'shutdown_signal', {
-    signal: 'SIGTERM',
-    memory: getMemoryUsageSnapshot(),
-  })
-})
-
-process.on('SIGINT', () => {
-  logServerEvent('warn', 'shutdown_signal', {
-    signal: 'SIGINT',
-    memory: getMemoryUsageSnapshot(),
-  })
-})
-
 function sendJson(response, statusCode, payload) {
   response.writeHead(
     statusCode,
@@ -609,25 +520,6 @@ function sendJson(response, statusCode, payload) {
     }),
   )
   response.end(JSON.stringify(payload))
-}
-
-function resetInMemoryCaches() {
-  searchCache.clear()
-  gamesCache.clear()
-  platformCache.clear()
-  platformStatsCache.clear()
-  boardCache.clear()
-  gamePageCache.clear()
-  gameSupplementalCache.clear()
-  gameIconRedirectCache.clear()
-  gameLivePointCache.clear()
-  platformDiscoveryRequestCache.clear()
-  platformStatsRequestCache.clear()
-  boardRequestCache.clear()
-  gamePageRequestCache.clear()
-  gameSupplementalRequestCache.clear()
-  gameLivePointRequestCache.clear()
-  lastBoardUniverseIds = []
 }
 
 function sleep(ms) {
@@ -850,36 +742,11 @@ function readCacheEntry(cache, key) {
   return cache.get(key) ?? null
 }
 
-function readStaleCacheValue(cache, key) {
-  return readCacheEntry(cache, key)?.value ?? null
-}
-
 function writeCache(cache, key, value, ttlMs) {
   cache.set(key, {
     value,
     expiresAt: Date.now() + ttlMs,
   })
-}
-
-function sweepExpiredCache(cache, now = Date.now()) {
-  for (const [key, entry] of cache.entries()) {
-    if (entry.expiresAt <= now) {
-      cache.delete(key)
-    }
-  }
-}
-
-function sweepAllCaches() {
-  const now = Date.now()
-  sweepExpiredCache(searchCache, now)
-  sweepExpiredCache(gamesCache, now)
-  sweepExpiredCache(platformCache, now)
-  sweepExpiredCache(platformStatsCache, now)
-  sweepExpiredCache(boardCache, now)
-  sweepExpiredCache(gamePageCache, now)
-  sweepExpiredCache(gameSupplementalCache, now)
-  sweepExpiredCache(gameIconRedirectCache, now)
-  sweepExpiredCache(gameLivePointCache, now)
 }
 
 function chunkItems(items, size) {
@@ -1342,7 +1209,7 @@ function buildScreenerSignal(game) {
 
 async function fetchScreenerPayload(query) {
   const plan = buildScreenerPlan(query)
-  const trackedIds = await getTrackedUniverseIds()
+  const trackedIds = getTrackedUniverseIds()
   const candidateIds = new Set(trackedIds)
 
   const candidateQuery =
@@ -1358,11 +1225,11 @@ async function fetchScreenerPayload(query) {
   const universeIds = [...candidateIds].slice(0, SCREENER_SEARCH_LIMIT + trackedIds.length)
   const { games, source } = await fetchUniverseGames(universeIds)
 
-  if (ALLOW_LIVE_READ_FALLBACK && source === 'live') {
-    await recordSnapshots(games)
+  if (source !== 'database') {
+    recordSnapshots(games)
   }
 
-  const historyMap = await getHistoryMap(universeIds, getHistoryCutoffIso())
+  const historyMap = getHistoryMap(universeIds, getHistoryCutoffIso())
   const enrichedGames = enrichGames(games, historyMap)
   const filteredGames = sortScreenedGames(
     enrichedGames.filter((game) => {
@@ -1951,7 +1818,7 @@ async function searchRobloxGames(query) {
       return staleCache.value
     }
 
-    const localMatches = await searchLocalGames(query)
+    const localMatches = searchLocalGames(query)
     if (localMatches.length > 0) {
       return localMatches
     }
@@ -2049,16 +1916,6 @@ async function fetchHomeRecommendationSet() {
     }
   }
 
-  if (
-    typeof lastHomeFetchCooldownUntil === 'string' &&
-    Date.parse(lastHomeFetchCooldownUntil) > Date.now()
-  ) {
-    return {
-      games: [],
-      discoveredSorts: [],
-    }
-  }
-
   lastHomeFetchAttemptedAt = new Date().toISOString()
   const discoveredByUniverseId = new Map()
   const discoveredSorts = []
@@ -2067,7 +1924,7 @@ async function fetchHomeRecommendationSet() {
     ROBLOX_AUTH_COOKIE_HEADERS.map((cookieHeader, index) =>
       fetchJson(
         'https://apis.roblox.com/discovery-api/omni-recommendation',
-        0,
+        MAX_FETCH_RETRIES,
         {
           method: 'POST',
           headers: buildRobloxAuthHeaders(cookieHeader, {
@@ -2096,20 +1953,7 @@ async function fetchHomeRecommendationSet() {
     lastHomeFetchSucceededAt = null
     lastHomeFetchSortCount = 0
     lastHomeFetchUniverseCount = 0
-    if (firstError?.statusCode === 429) {
-      lastHomeFetchCooldownUntil = new Date(
-        Date.now() + HOME_RECOMMENDATION_COOLDOWN_MS,
-      ).toISOString()
-    }
     throw firstError instanceof Error ? firstError : new Error(lastHomeFetchError)
-  }
-
-  if (failedPayloads.some((result) => result.reason?.statusCode === 429)) {
-    lastHomeFetchCooldownUntil = new Date(
-      Date.now() + HOME_RECOMMENDATION_COOLDOWN_MS,
-    ).toISOString()
-  } else {
-    lastHomeFetchCooldownUntil = null
   }
 
   lastHomeFetchError = failedPayloads.length > 0
@@ -2166,13 +2010,7 @@ async function fetchPlatformDiscoverySet() {
     }
   }
 
-  const pendingRequest = platformDiscoveryRequestCache.get(cacheKey)
-
-  if (pendingRequest) {
-    return pendingRequest
-  }
-
-  const request = (async () => {
+  try {
     const [sortPayloads, homeRecommendationSet] = await Promise.all([
       Promise.all(
         PLATFORM_SORT_IDS.map(async (sortId) => ({
@@ -2292,7 +2130,7 @@ async function fetchPlatformDiscoverySet() {
       ...platformPayload,
       source,
     }
-  })().catch((error) => {
+  } catch (error) {
     const stalePlatform = readCacheEntry(platformCache, cacheKey)
     if (stalePlatform) {
       return {
@@ -2302,24 +2140,11 @@ async function fetchPlatformDiscoverySet() {
     }
 
     throw error
-  })
-
-  platformDiscoveryRequestCache.set(cacheKey, request)
-
-  try {
-    return await request
-  } finally {
-    if (platformDiscoveryRequestCache.get(cacheKey) === request) {
-      platformDiscoveryRequestCache.delete(cacheKey)
-    }
   }
 }
 
 async function fetchUniverseGames(universeIds, options = {}) {
-  const {
-    bypassCache = false,
-    retries = MAX_FETCH_RETRIES,
-  } = options
+  const { bypassCache = false } = options
 
   if (universeIds.length === 0) {
     return {
@@ -2333,9 +2158,9 @@ async function fetchUniverseGames(universeIds, options = {}) {
     const responses = await mapWithConcurrency(
       batches,
       UNIVERSE_FETCH_BATCH_CONCURRENCY,
-      (batch) => fetchUniverseGames(batch, { bypassCache, retries }),
+      (batch) => fetchUniverseGames(batch),
     )
-    const sourcePriority = { live: 0, cache: 1, [STORE_SOURCE]: 2 }
+    const sourcePriority = { live: 0, cache: 1, database: 2 }
     const mergedSource = responses.reduce(
       (current, entry) =>
         sourcePriority[entry.source] > sourcePriority[current] ? entry.source : current,
@@ -2360,8 +2185,8 @@ async function fetchUniverseGames(universeIds, options = {}) {
 
   try {
     const [gamesResponse, votesResponse, thumbnailsResponse, bannersResponse] = await Promise.all([
-      fetchJson(`https://games.roblox.com/v1/games?universeIds=${idList}`, retries),
-      fetchJson(`https://games.roblox.com/v1/games/votes?universeIds=${idList}`, retries),
+      fetchJson(`https://games.roblox.com/v1/games?universeIds=${idList}`),
+      fetchJson(`https://games.roblox.com/v1/games/votes?universeIds=${idList}`),
       fetchJson(
         `https://thumbnails.roblox.com/v1/games/icons?universeIds=${idList}&size=150x150&format=Png&isCircular=false`,
         0,
@@ -2448,11 +2273,11 @@ async function fetchUniverseGames(universeIds, options = {}) {
       }
     }
 
-    const snapshotGames = await getLatestSnapshotGames(universeIds)
+    const snapshotGames = getLatestSnapshotGames(universeIds)
     if (snapshotGames.length > 0) {
       return {
         games: snapshotGames,
-        source: STORE_SOURCE,
+        source: 'database',
       }
     }
 
@@ -2461,83 +2286,47 @@ async function fetchUniverseGames(universeIds, options = {}) {
 }
 
 async function fetchGameLivePointPayload(universeId) {
-  const cacheKey = String(universeId)
-  const cachedPoint = readCache(gameLivePointCache, cacheKey)
-
-  if (cachedPoint) {
-    return cachedPoint
-  }
-
-  const pendingRequest = gameLivePointRequestCache.get(cacheKey)
-
-  if (pendingRequest) {
-    return pendingRequest
-  }
-
-  const request = (async () => {
-    const snapshotGame = (await getLatestSnapshotGames([universeId]))[0]
-
-    if (snapshotGame) {
-      const payload = {
-        universeId,
-        value: snapshotGame.playing,
-        timestamp: new Date().toISOString(),
-        source: STORE_SOURCE,
-      }
-      writeCache(gameLivePointCache, cacheKey, payload, GAME_LIVE_POINT_CACHE_TTL_MS)
-      return payload
-    }
-
-    try {
-      if (!ALLOW_LIVE_READ_FALLBACK) {
-        throw new Error('Live read fallback disabled.')
-      }
-
-      const response = await fetchJson(
-        `https://games.roblox.com/v1/games?universeIds=${universeId}`,
-      )
-      const game = response.data?.[0]
-
-      if (!game) {
-        const error = new Error('Game not found.')
-        error.statusCode = 404
-        throw error
-      }
-
-      const payload = {
-        universeId,
-        value: game.playing ?? 0,
-        timestamp: new Date().toISOString(),
-        source: 'live',
-      }
-      writeCache(gameLivePointCache, cacheKey, payload, GAME_LIVE_POINT_CACHE_TTL_MS)
-      return payload
-    } catch (error) {
-      const fallbackSnapshotGame = (await getLatestSnapshotGames([universeId]))[0]
-
-      if (!fallbackSnapshotGame) {
-        throw error
-      }
-
-      const payload = {
-        universeId,
-        value: fallbackSnapshotGame.playing,
-        timestamp: new Date().toISOString(),
-        source: STORE_SOURCE,
-      }
-      writeCache(gameLivePointCache, cacheKey, payload, GAME_LIVE_POINT_CACHE_TTL_MS)
-      return payload
-    }
-  })()
-
-  gameLivePointRequestCache.set(cacheKey, request)
-
   try {
-    return await request
-  } finally {
-    if (gameLivePointRequestCache.get(cacheKey) === request) {
-      gameLivePointRequestCache.delete(cacheKey)
+    const response = await fetchJson(
+      `https://games.roblox.com/v1/games?universeIds=${universeId}`,
+    )
+    const game = response.data?.[0]
+
+    if (!game) {
+      const error = new Error('Game not found.')
+      error.statusCode = 404
+      throw error
     }
+
+    return {
+      universeId,
+      value: game.playing ?? 0,
+      timestamp: new Date().toISOString(),
+      source: 'live',
+    }
+  } catch (error) {
+    const snapshotGame = getLatestSnapshotGames([universeId])[0]
+
+    if (!snapshotGame) {
+      throw error
+    }
+
+    return {
+      universeId,
+      value: snapshotGame.playing,
+      timestamp: new Date().toISOString(),
+      source: 'database',
+    }
+  }
+}
+
+function buildPlatformStatsWindow(range = '24h') {
+  const endDatetime = new Date().toISOString()
+  const startDatetime = new Date(Date.now() - CHART_RANGE_MS[range]).toISOString()
+
+  return {
+    startDatetime,
+    endDatetime,
   }
 }
 
@@ -2559,48 +2348,50 @@ function buildPlatformTone(latestValue, timeline) {
   return 'neutral'
 }
 
-async function buildStoredPlatformStats(range = '24h') {
-  const cutoffIso = new Date(Date.now() - CHART_RANGE_MS[range]).toISOString()
-  const storedHistory = await getPlatformHistoryPoints(cutoffIso)
+function normalizePlatformStatsPayload(payload, source, range = '24h') {
+  const history = Array.isArray(payload?.ccu_history) ? payload.ccu_history : []
   const timeline = limitTrendPoints(
-    storedHistory.map((entry) => ({
-      label: formatTrendLabel(entry.timestamp),
-      timestamp: entry.timestamp,
-      value: entry.value,
-    })),
+    history
+      .filter((entry) => Number.isFinite(entry?.playing) && entry?.process_timestamp)
+      .map((entry) => ({
+        label: formatTrendLabel(entry.process_timestamp),
+        timestamp: entry.process_timestamp,
+        value: entry.playing,
+      })),
     getMaxTrendPoints(range),
   )
-
-  const latestPoint = storedHistory.at(-1) ?? await getPlatformCurrentMetric()
-
-  if (!latestPoint) {
-    return null
-  }
-
-  const peakPoint = timeline.reduce(
-    (current, entry) => (!current || entry.value > current.value ? entry : current),
-    null,
-  )
-  const tone = buildPlatformTone(latestPoint.value, timeline)
+  const latestTimestamp =
+    payload?.latest_ccu_timestamp ??
+    timeline.at(-1)?.timestamp ??
+    new Date().toISOString()
+  const latestValue =
+    payload?.latest_ccu ??
+    timeline.at(-1)?.value ??
+    0
+  const tone = buildPlatformTone(latestValue, timeline)
 
   return {
     status: {
-      label: 'Full platform CCU synced',
-      detail: `${formatWholeNumber(latestPoint.value)} players across Roblox right now.`,
+      label:
+        source === 'live'
+          ? 'Full platform CCU live'
+          : 'Full platform CCU using cache',
+      detail: `${formatWholeNumber(latestValue)} players across Roblox right now.`,
       tone,
     },
-    source: 'synced',
+    source,
     latest: {
-      value: latestPoint.value,
-      timestamp: latestPoint.timestamp,
-      source: latestPoint.source ?? 'synced',
+      value: latestValue,
+      timestamp: latestTimestamp,
+      source,
     },
-    peak: peakPoint
-      ? {
-          value: peakPoint.value,
-          timestamp: peakPoint.timestamp,
-        }
-      : null,
+    peak:
+      Number.isFinite(payload?.peak_ccu) && payload?.peak_ccu_timestamp
+        ? {
+            value: payload.peak_ccu,
+            timestamp: payload.peak_ccu_timestamp,
+          }
+        : null,
     timeline,
     tone,
   }
@@ -2610,66 +2401,53 @@ async function fetchFullPlatformStats(range = '24h') {
   const cachedStats = readCache(platformStatsCache, range)
 
   if (cachedStats) {
-    return cachedStats
-  }
-
-  const pendingRequest = platformStatsRequestCache.get(range)
-
-  if (pendingRequest) {
-    return pendingRequest
-  }
-
-  const request = (async () => {
-    const staleStats = readStaleCacheValue(platformStatsCache, range)
-
-    try {
-      const storedStats = await buildStoredPlatformStats(range)
-
-      if (storedStats) {
-        writeCache(platformStatsCache, range, storedStats, getPlatformStatsCacheTtlMs(range))
-        return storedStats
-      }
-
-      return {
-        status: {
-          label: 'Platform tracking warmup underway',
-          detail: 'The ingest worker has not written the first platform point yet.',
-          tone: 'neutral',
-        },
-        source: 'warming',
-        latest: null,
-        peak: null,
-        timeline: [],
-        tone: 'neutral',
-      }
-    } catch (error) {
-      if (staleStats) {
-        return {
-          ...staleStats,
-          source: 'cache',
-          status: {
-            ...staleStats.status,
-            label: 'Platform CCU using cache',
-          },
-          latest: {
-            ...staleStats.latest,
-            source: 'cache',
-          },
-        }
-      }
-
-      throw error
+    return {
+      ...cachedStats,
+      source: 'live',
     }
-  })()
+  }
 
-  platformStatsRequestCache.set(range, request)
+  const { startDatetime, endDatetime } = buildPlatformStatsWindow(range)
 
   try {
-    return await request
-  } finally {
-    if (platformStatsRequestCache.get(range) === request) {
-      platformStatsRequestCache.delete(range)
+    const response = await fetchJsonWithOptions(
+      FULL_PLATFORM_STATS_URL,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          start_datetime: startDatetime,
+          end_datetime: endDatetime,
+        }),
+      },
+      0,
+    )
+
+    const normalized = normalizePlatformStatsPayload(response?.data ?? response, 'live', range)
+    recordPlatformCurrentMetric(normalized.latest)
+    writeCache(platformStatsCache, range, normalized, getPlatformStatsCacheTtlMs(range))
+    return normalized
+  } catch (error) {
+    const staleStats = readCacheEntry(platformStatsCache, range)
+
+    if (staleStats) {
+      return {
+        ...staleStats.value,
+        source: 'cache',
+        status: {
+          ...staleStats.value.status,
+          label: 'Full platform CCU using cache',
+        },
+        latest: {
+          ...staleStats.value.latest,
+          source: 'cache',
+        },
+      }
     }
+
+    throw error
   }
 }
 
@@ -2684,18 +2462,14 @@ async function fetchFullPlatformPointPayload() {
     }
   }
 
-  const storedPoint = await getPlatformCurrentMetric()
+  const storedPoint = getPlatformCurrentMetric()
 
   if (storedPoint) {
     return storedPoint
   }
 
   const payload = await fetchFullPlatformStats('24h')
-  return payload.latest ?? {
-    value: 0,
-    timestamp: new Date().toISOString(),
-    source: payload.source ?? 'warming',
-  }
+  return payload.latest
 }
 
 function decodeHtmlEntities(value) {
@@ -3647,9 +3421,7 @@ async function fetchCreatorPortfolio(game) {
       .map((entry) => entry.id)
 
     const livePortfolio =
-      selectedUniverseIds.length > 0
-        ? await fetchUniverseGames(selectedUniverseIds, { retries: 0 })
-        : { games: [] }
+      selectedUniverseIds.length > 0 ? await fetchUniverseGames(selectedUniverseIds) : { games: [] }
     const liveByUniverseId = new Map(
       livePortfolio.games.map((entry) => [entry.universeId, entry]),
     )
@@ -3933,197 +3705,128 @@ async function fetchGameSupplementalData(game, { allowNetwork = true } = {}) {
     return buildUnavailableGameSupplementalData(game)
   }
 
-  const pendingRequest = gameSupplementalRequestCache.get(cacheKey)
+  const [
+    pageMeta,
+    ageRating,
+    creatorProfile,
+    creatorPortfolio,
+    servers,
+    gamePasses,
+    developerProducts,
+  ] =
+    await Promise.all([
+      fetchRobloxGamePageMetadata(game.rootPlaceId),
+      fetchAgeRating(game.universeId),
+      fetchCreatorProfile(game),
+      fetchCreatorPortfolio(game),
+      fetchServerSample(game),
+      fetchGamePassInventory(game.universeId),
+      fetchDeveloperProductInventory(game.universeId),
+    ])
 
-  if (pendingRequest) {
-    return pendingRequest
-  }
-
-  const request = (async () => {
-    const [
-      pageMeta,
-      ageRating,
-      creatorProfile,
-      creatorPortfolio,
-      servers,
+  const supplemental = {
+    pageMeta,
+    ageRating,
+    creatorProfile,
+    creatorPortfolio,
+    servers,
+    store: {
       gamePasses,
       developerProducts,
-    ] =
-      await Promise.all([
-        fetchRobloxGamePageMetadata(game.rootPlaceId),
-        fetchAgeRating(game.universeId),
-        fetchCreatorProfile(game),
-        fetchCreatorPortfolio(game),
-        fetchServerSample(game),
-        fetchGamePassInventory(game.universeId),
-        fetchDeveloperProductInventory(game.universeId),
-      ])
-
-    const supplemental = {
-      pageMeta,
-      ageRating,
-      creatorProfile,
-      creatorPortfolio,
-      servers,
-      store: {
-        gamePasses,
-        developerProducts,
-      },
-    }
-
-    writeCache(
-      gameSupplementalCache,
-      cacheKey,
-      supplemental,
-      GAME_SUPPLEMENTAL_CACHE_TTL_MS,
-    )
-
-    return supplemental
-  })()
-
-  gameSupplementalRequestCache.set(cacheKey, request)
-
-  try {
-    return await request
-  } finally {
-    if (gameSupplementalRequestCache.get(cacheKey) === request) {
-      gameSupplementalRequestCache.delete(cacheKey)
-    }
+    },
   }
+
+  writeCache(
+    gameSupplementalCache,
+    cacheKey,
+    supplemental,
+    GAME_SUPPLEMENTAL_CACHE_TTL_MS,
+  )
+
+  return supplemental
 }
 
 async function hydrateTrackedUniverses(universeIds, range = '24h') {
-  const currentTrackedIds = await getTrackedUniverseIds()
+  const currentTrackedIds = getTrackedUniverseIds()
   const ids = universeIds.length > 0 ? universeIds : currentTrackedIds
   const uniqueIds = [...new Set(ids.length > 0 ? ids : DEFAULT_TRACKED_IDS)]
   const { games, source } = await fetchUniverseGames(uniqueIds)
 
-  if (ALLOW_LIVE_READ_FALLBACK && source === 'live') {
-    await recordSnapshots(games)
+  if (source === 'live' && SERVER_ENABLE_SCHEDULED_INGEST) {
+    recordSnapshots(games)
   }
-  await replaceTrackedUniverseIds(uniqueIds)
+  replaceTrackedUniverseIds(uniqueIds)
 
-  const historyMap = await getHistoryMap(uniqueIds, getHistoryCutoffIso())
+  const historyMap = getHistoryMap(uniqueIds, getHistoryCutoffIso())
   return buildBoardPayload(games, historyMap, source, range)
 }
 
-async function fetchPlatformBoardPayload(
-  range = '24h',
-) {
+async function fetchPlatformBoardPayload(range = '24h') {
   const cachedBoard = readCache(boardCache, range)
 
   if (cachedBoard) {
     return cachedBoard
   }
 
-  const pendingRequest = boardRequestCache.get(range)
+  const trackedUniverseIds = getTrackedUniverseIds()
+  const trackedIds = trackedUniverseIds.length > 0 ? trackedUniverseIds : DEFAULT_TRACKED_IDS
+  const trackedSnapshotGames = getLatestSnapshotGames(trackedIds)
+  const [platformSet, trackedLiveFallback] = await Promise.all([
+    fetchPlatformDiscoverySet(),
+    trackedSnapshotGames.length > 0
+      ? Promise.resolve({ games: trackedSnapshotGames, source: 'database' })
+      : fetchUniverseGames(trackedIds),
+  ])
+  lastBoardUniverseIds = platformSet.discoveredUniverseIds
 
-  if (pendingRequest) {
-    return pendingRequest
+  const liveSnapshotGames = mergeSnapshotGames(
+    platformSet.source === 'live' ? platformSet.games : [],
+    trackedLiveFallback.source === 'live' ? trackedLiveFallback.games : [],
+  )
+
+  if (SERVER_ENABLE_SCHEDULED_INGEST && liveSnapshotGames.length > 0) {
+    recordSnapshots(liveSnapshotGames, {
+      observedAt: new Date().toISOString(),
+    })
   }
 
-  const staleBoard = readStaleCacheValue(boardCache, range)
-  const request = (async () => {
-    const trackedUniverseIds = await getTrackedUniverseIds()
-    const trackedIds = trackedUniverseIds.length > 0 ? trackedUniverseIds : DEFAULT_TRACKED_IDS
-    let snapshotGames = await getLatestSnapshotGames(trackedIds)
-    let source = STORE_SOURCE
+  const platformHistoryMap = getHistoryMap(
+    platformSet.discoveredUniverseIds,
+    getHistoryCutoffIso(),
+  )
+  const trackedHistoryMap = getHistoryMap(trackedIds, getHistoryCutoffIso())
 
-    if (snapshotGames.length === 0 && ALLOW_LIVE_READ_FALLBACK) {
-      const liveFallback = await fetchUniverseGames(trackedIds)
-      snapshotGames = liveFallback.games
-      source = liveFallback.source
-    }
+  const payload = buildBoardPayload(
+    platformSet.games,
+    platformHistoryMap,
+    platformSet.source,
+    range,
+    {
+      games: trackedLiveFallback.games,
+      historyMap: trackedHistoryMap,
+    },
+    {
+      discoveredSorts: platformSet.discoveredSorts,
+    },
+  )
 
-    if (snapshotGames.length === 0) {
-      return {
-        status: {
-          label: 'Tracking warmup underway',
-          detail: 'The ingest worker has not written the first board snapshot yet.',
-          tone: 'neutral',
-        },
-        ops: {
-          source: 'warming',
-          ingestIntervalMinutes: Math.round(INGEST_INTERVAL_MS / 60_000),
-          lastIngestedAt,
-        },
-        metrics: [],
-        leaderboard: [],
-        topExperiences: [],
-        watchlist: [],
-        summaryFeed: [],
-        trendingNow: [],
-        timeline: [],
-        eventFeed: [],
-        genreHeatmap: [],
-        updateCalendar: [],
-        developerBoard: [],
-        alertQueue: [],
-      }
-    }
-
-    lastBoardUniverseIds = snapshotGames.map((game) => game.universeId)
-    const historyMap = await getHistoryMap(lastBoardUniverseIds, getHistoryCutoffIso())
-
-    const payload = buildBoardPayload(
-      snapshotGames,
-      historyMap,
-      source,
-      range,
-      {
-        games: snapshotGames,
-        historyMap,
-      },
-      null,
-    )
-
-    writeCache(boardCache, range, payload, getBoardPayloadCacheTtlMs(range))
-    return payload
-  })().catch((error) => {
-    if (staleBoard) {
-      return {
-        ...staleBoard,
-        status: {
-          ...staleBoard.status,
-          label: 'Live Roblox feed using cache',
-          tone: 'neutral',
-        },
-        ops: {
-          ...(staleBoard.ops ?? {}),
-          source: 'cache',
-          lastIngestedAt,
-        },
-      }
-    }
-
-    throw error
-  })
-
-  boardRequestCache.set(range, request)
-
-  try {
-    return await request
-  } finally {
-    if (boardRequestCache.get(range) === request) {
-      boardRequestCache.delete(range)
-    }
-  }
+  writeCache(boardCache, range, payload, getBoardPayloadCacheTtlMs(range))
+  return payload
 }
 
-async function fetchBoardLivePointPayload() {
-  const trackedUniverseIds = await getTrackedUniverseIds()
+function fetchBoardLivePointPayload() {
   const universeIds =
     lastBoardUniverseIds.length > 0
       ? lastBoardUniverseIds
-      : trackedUniverseIds.length > 0
-        ? trackedUniverseIds
+      : getTrackedUniverseIds().length > 0
+        ? getTrackedUniverseIds()
         : DEFAULT_TRACKED_IDS
-  const latestGames = await getLatestSnapshotGames(universeIds)
+  const latestGames = getLatestSnapshotGames(universeIds)
 
   return {
     value: latestGames.reduce((sum, game) => sum + game.playing, 0),
     timestamp: new Date().toISOString(),
-    source: STORE_SOURCE,
+    source: 'database',
   }
 }
 
@@ -4135,158 +3838,83 @@ async function fetchGamePagePayload(universeId, range = '24h', detailLevel = 'fu
     return cachedPayload
   }
 
-  const pendingRequest = gamePageRequestCache.get(cacheKey)
+  const { games, source } = await fetchUniverseGames([universeId])
 
-  if (pendingRequest) {
-    return pendingRequest
+  if (games.length === 0) {
+    const error = new Error('Game not found.')
+    error.statusCode = 404
+    throw error
   }
 
-  const request = (async () => {
-    const stalePayload = readStaleCacheValue(gamePageCache, cacheKey)
-    const staleCorePayload =
-      detailLevel === 'full'
-        ? readStaleCacheValue(gamePageCache, `${universeId}:${range}:core`)
-        : null
-
-    if (detailLevel === 'core') {
-      const snapshotPayload = await buildFastGamePageSnapshotPayload(universeId, range)
-
-      if (snapshotPayload) {
-        writeCache(
-          gamePageCache,
-          cacheKey,
-          snapshotPayload,
-          getGamePagePayloadCacheTtlMs(range, detailLevel),
-        )
-        return snapshotPayload
-      }
-    }
-
-    try {
-      const { games, source } = await fetchUniverseGames([universeId], { retries: 0 })
-
-      if (games.length === 0) {
-        const error = new Error('Game not found.')
-        error.statusCode = 404
-        throw error
-      }
-
-      if (ALLOW_LIVE_READ_FALLBACK && source === 'live') {
-        await recordSnapshots(games)
-      }
-
-      await appendTrackedUniverseIds([universeId], TRACKED_UNIVERSE_CAP)
-
-      const trackedUniverseIds = await getTrackedUniverseIds()
-      const historyMap = await getHistoryMap([universeId], getHistoryCutoffIso())
-      const peerGames = (await getLatestSnapshotGames(trackedUniverseIds))
-        .slice(0, GAME_PAGE_PEER_POOL_LIMIT)
-      const supplemental = await fetchGameSupplementalData(games[0], {
-        allowNetwork: detailLevel === 'full',
-      })
-      const payload = await buildGameDetailPayload(
-        games[0],
-        historyMap,
-        peerGames,
-        trackedUniverseIds,
-        supplemental,
-        source,
-        range,
-      )
-
-      writeCache(
-        gamePageCache,
-        cacheKey,
-        payload,
-        getGamePagePayloadCacheTtlMs(range, detailLevel),
-      )
-
-      if (detailLevel === 'full') {
-        writeCache(
-          gamePageCache,
-          `${universeId}:${range}:core`,
-          payload,
-          getGamePagePayloadCacheTtlMs(range, 'core'),
-        )
-      }
-
-      return payload
-    } catch (error) {
-      const fallbackPayload = stalePayload ?? staleCorePayload
-
-      if (fallbackPayload) {
-        return markGamePagePayloadAsCached(fallbackPayload)
-      }
-
-      throw error
-    }
-  })()
-
-  gamePageRequestCache.set(cacheKey, request)
-
-  try {
-    return await request
-  } finally {
-    if (gamePageRequestCache.get(cacheKey) === request) {
-      gamePageRequestCache.delete(cacheKey)
-    }
+  if (source === 'live' && SERVER_ENABLE_SCHEDULED_INGEST) {
+    recordSnapshots(games)
   }
+
+  appendTrackedUniverseIds([universeId], TRACKED_UNIVERSE_CAP)
+
+  const trackedUniverseIds = getTrackedUniverseIds()
+  const historyMap = getHistoryMap([universeId], getHistoryCutoffIso())
+  const peerGames = getLatestSnapshotGames(trackedUniverseIds)
+  const supplemental = await fetchGameSupplementalData(games[0], {
+    allowNetwork: detailLevel === 'full',
+  })
+  const payload = buildGameDetailPayload(
+    games[0],
+    historyMap,
+    peerGames,
+    trackedUniverseIds,
+    supplemental,
+    source,
+    range,
+  )
+
+  if (detailLevel === 'full') {
+    recordGamePageSnapshot(payload, {
+      source: `game_page_${source}`,
+    })
+  }
+
+  writeCache(
+    gamePageCache,
+    cacheKey,
+    payload,
+    getGamePagePayloadCacheTtlMs(range, detailLevel),
+  )
+
+  if (detailLevel === 'full') {
+    writeCache(
+      gamePageCache,
+      `${universeId}:${range}:core`,
+      payload,
+      getGamePagePayloadCacheTtlMs(range, 'full'),
+    )
+  }
+
+  return payload
 }
 
 async function pollTrackedUniverses() {
-  const ingestRunId = await startIngestRun('scheduler')
+  const ingestRunId = startIngestRun('scheduler')
 
   try {
-    const trackedUniverseIds = await getTrackedUniverseIds()
-    const trackedIds = trackedUniverseIds.length > 0 ? trackedUniverseIds : DEFAULT_TRACKED_IDS
-    const trackedLiveFallback = await fetchUniverseGames(trackedIds)
-    const platformSet = await fetchPlatformDiscoverySet()
-    const discoveredUniverseIds = platformSet.discoveredUniverseIds ?? []
-    const observedAt = new Date().toISOString()
-    const liveSnapshotGames = mergeSnapshotGames(
-      platformSet.source === 'live' ? platformSet.games : [],
-      trackedLiveFallback.source === 'live' ? trackedLiveFallback.games : [],
-    )
-    lastBoardUniverseIds = platformSet.discoveredUniverseIds
-
-    if (discoveredUniverseIds.length > 0) {
-      await appendTrackedUniverseIds(discoveredUniverseIds, TRACKED_UNIVERSE_CAP)
-    }
-
-    if (liveSnapshotGames.length > 0) {
-      await recordSnapshots(liveSnapshotGames, {
-        observedAt,
-        source: 'server_live',
-      })
-      const platformPoint = {
-        timestamp: observedAt,
-        value: liveSnapshotGames.reduce((sum, game) => sum + (Number(game.playing) || 0), 0),
-        source: 'server_live',
-      }
-      await recordPlatformCurrentMetric(platformPoint)
-      await recordPlatformHistoryPoints([platformPoint], 'server_live')
-    }
-
-    const trackedUniverseCount = (await getTrackedUniverseIds()).length
-    lastIngestedAt = observedAt
+    const payload = await fetchPlatformBoardPayload('24h')
+    lastIngestedAt = new Date().toISOString()
     lastIngestError = null
 
-    await finishIngestRun(ingestRunId, {
+    finishIngestRun(ingestRunId, {
       status: 'success',
-      source: platformSet.source ?? 'live',
-      trackedUniverseCount,
-      discoveredUniverseCount: discoveredUniverseIds.length,
+      source: payload.ops?.source ?? 'live',
+      trackedUniverseCount: getTrackedUniverseIds().length,
+      discoveredUniverseCount: payload.topExperiences?.length ?? 0,
     })
 
-    console.log(
-      `[roterminal-server] ingested platform discovery set (${trackedUniverseCount} tracked, ${discoveredUniverseIds.length} discovered)`,
-    )
+    console.log('[roterminal-server] ingested platform discovery set')
   } catch (error) {
     lastIngestError = error instanceof Error ? error.message : 'Unknown ingestion failure'
-    await finishIngestRun(ingestRunId, {
+    finishIngestRun(ingestRunId, {
       status: 'failed',
       source: 'error',
-      trackedUniverseCount: (await getTrackedUniverseIds()).length,
+      trackedUniverseCount: getTrackedUniverseIds().length,
       errorMessage: lastIngestError,
     })
     console.error('[roterminal-server] polling failed', error)
@@ -4298,7 +3926,7 @@ async function runScheduledIngest() {
     return
   }
 
-  const acquired = await tryAcquireIngestLease('scheduler', schedulerOwnerId, {
+  const acquired = tryAcquireIngestLease('scheduler', schedulerOwnerId, {
     ownerLabel: `api-server:${PORT}`,
     ttlMs: INGEST_LEASE_TTL_MS,
   })
@@ -4316,18 +3944,11 @@ async function runScheduledIngest() {
   }
 }
 
-async function readIngestHealthSnapshot() {
-  const [latestIngestRun, activeLease] = await Promise.all([
-    getLatestIngestRun(),
-    getActiveIngestLease('scheduler'),
-  ])
-  const resolvedLastIngestedAt = latestIngestRun?.finished_at ?? lastIngestedAt
-  const resolvedLastIngestError =
-    latestIngestRun?.status === 'failed'
-      ? latestIngestRun.error_message ?? lastIngestError
-      : lastIngestError
+function getOpsMetrics() {
+  const latestIngestRun = getLatestIngestRun()
+  const activeLease = getActiveIngestLease('scheduler')
   const lastIngestedAtMs =
-    typeof resolvedLastIngestedAt === 'string' ? Date.parse(resolvedLastIngestedAt) : Number.NaN
+    typeof lastIngestedAt === 'string' ? Date.parse(lastIngestedAt) : Number.NaN
   const activeLeaseExpiresAtMs =
     typeof activeLease?.expires_at === 'string'
       ? Date.parse(activeLease.expires_at)
@@ -4337,62 +3958,56 @@ async function readIngestHealthSnapshot() {
   const missingIngest = !Number.isFinite(lastIngestedAtMs)
   const activeLeaseExpired =
     Number.isFinite(activeLeaseExpiresAtMs) && activeLeaseExpiresAtMs <= Date.now()
-  const ingestHealthy =
-    resolvedLastIngestError == null && !missingIngest && !staleIngest && !activeLeaseExpired
-
-  return {
-    latestIngestRun,
-    activeLease,
-    lastIngestedAt: resolvedLastIngestedAt,
-    lastIngestError: resolvedLastIngestError,
-    staleIngest,
-    missingIngest,
-    activeLeaseExpired,
-    ingestHealthy,
-  }
-}
-
-async function getOpsMetrics() {
-  const [
-    ingestState,
-    trackedUniverseIds,
-    catalogUniverseCount,
-    observationCount,
-  ] = await Promise.all([
-    readIngestHealthSnapshot(),
-    getTrackedUniverseIds(),
-    countCatalogEntries(),
-    countObservations(),
-  ])
-  const healthy = SERVER_ENABLE_SCHEDULED_INGEST ? ingestState.ingestHealthy : true
+  const healthy =
+    lastIngestError == null && !missingIngest && !staleIngest && !activeLeaseExpired
 
   return {
     ok: healthy,
     uptimeSeconds: Math.round((Date.now() - startedAt) / 1000),
-    trackedUniverseCount: trackedUniverseIds.length,
+    trackedUniverseCount: getTrackedUniverseIds().length,
+    tracking: {
+      tierCounts: getTrackedTierCounts(),
+      discoverySourceCounts: getTrackedDiscoverySourceCounts(),
+      thresholds: {
+        fastLaneCcu: TRACKING_FAST_LANE_CCU,
+        priorityCcu: TRACKING_PRIORITY_CCU,
+        warmCcu: TRACKING_WARM_CCU,
+      },
+      pollIntervalsMinutes: {
+        tier_a: TIER_A_POLL_MINUTES,
+        tier_b: TIER_B_POLL_MINUTES,
+        tier_c: TIER_C_POLL_MINUTES,
+        tier_d: TIER_D_POLL_MINUTES,
+      },
+    },
     warehouse: {
-      catalogUniverseCount,
-      observationCount,
+      catalogUniverseCount: countCatalogEntries(),
+      observationCount: countObservations(),
+      dailyMetricCount: countDailyMetrics(),
+      metadataHistoryCount: countMetadataHistory(),
+      derivedHistoryCount: countDerivedHistory(),
+      externalHistoryCount: countExternalHistory(),
+      externalImportRunCount: countExternalImportRuns(),
+      legacySnapshotCount: countSnapshots(),
       observationRetentionDays: Math.round(SNAPSHOT_RETENTION_MS / ONE_DAY_MS),
     },
-    lastIngestedAt: ingestState.lastIngestedAt,
-    lastIngestError: ingestState.lastIngestError,
-    latestIngestRun: ingestState.latestIngestRun,
-    activeIngestLease: ingestState.activeLease,
+    lastIngestedAt,
+    lastIngestError,
+    latestIngestRun,
+    activeIngestLease: activeLease,
     ingestIntervalMs: INGEST_INTERVAL_MS,
     ingestStaleAfterMs: INGEST_STALE_AFTER_MS,
     ingest: {
-      healthy: ingestState.ingestHealthy,
-      missing: ingestState.missingIngest,
-      stale: ingestState.staleIngest,
-      activeLeaseExpired: ingestState.activeLeaseExpired,
+      healthy,
+      missing: missingIngest,
+      stale: staleIngest,
+      activeLeaseExpired,
     },
     homeRecommendations: {
       seedCountConfigured: ROBLOX_AUTH_COOKIE_HEADERS.length,
       lastAttemptedAt: lastHomeFetchAttemptedAt,
       lastSucceededAt: lastHomeFetchSucceededAt,
       lastError: lastHomeFetchError,
-      cooldownUntil: lastHomeFetchCooldownUntil,
       sortCount: lastHomeFetchSortCount,
       universeCount: lastHomeFetchUniverseCount,
       seedSuccessCount: lastHomeFetchSeedSuccessCount,
@@ -4405,40 +4020,7 @@ async function getOpsMetrics() {
       boardKeys: boardCache.size,
       supplementalKeys: gameSupplementalCache.size,
     },
-    dataBackend: DATA_BACKEND,
-    databasePath: DATA_BACKEND === 'sqlite' ? DB_PATH : null,
-  }
-}
-
-async function getReadyStatus() {
-  const ingestState = await readIngestHealthSnapshot()
-  const ok = SERVER_ENABLE_SCHEDULED_INGEST ? ingestState.ingestHealthy : true
-
-  return {
-    ok,
-    uptimeSeconds: Math.round((Date.now() - startedAt) / 1000),
-    lastIngestedAt: ingestState.lastIngestedAt,
-    lastIngestError: ingestState.lastIngestError,
-    scheduledIngestEnabled: SERVER_ENABLE_SCHEDULED_INGEST,
-    ingest: {
-      healthy: ingestState.ingestHealthy,
-      missing: ingestState.missingIngest,
-      stale: ingestState.staleIngest,
-    },
-    homeRecommendations: {
-      seedCountConfigured: ROBLOX_AUTH_COOKIE_HEADERS.length,
-      lastAttemptedAt: lastHomeFetchAttemptedAt,
-      lastSucceededAt: lastHomeFetchSucceededAt,
-      lastError: lastHomeFetchError,
-      cooldownUntil: lastHomeFetchCooldownUntil,
-    },
-    cache: {
-      searchKeys: searchCache.size,
-      gameKeys: gamesCache.size,
-      platformKeys: platformCache.size,
-      boardKeys: boardCache.size,
-      supplementalKeys: gameSupplementalCache.size,
-    },
+    databasePath: DB_PATH,
   }
 }
 
@@ -4518,7 +4100,7 @@ function buildGameStats(game) {
   ]
 }
 
-async function buildGameDetailPayload(
+function buildGameDetailPayload(
   game,
   historyMap,
   peerGames,
@@ -4528,7 +4110,7 @@ async function buildGameDetailPayload(
   range = '24h',
 ) {
   const enrichedGame = enrichGames([game], historyMap)[0]
-  const peerHistoryMap = await getHistoryMap(
+  const peerHistoryMap = getHistoryMap(
     peerGames.map((peer) => peer.universeId),
     getHistoryCutoffIso(),
   )
@@ -4659,69 +4241,39 @@ async function buildGameDetailPayload(
   }
 }
 
-function markGamePagePayloadAsCached(payload) {
-  return {
-    ...payload,
-    status: payload?.game?.name
-      ? {
-          ...payload.status,
-          label: `${payload.game.name} page using cache`,
-          tone: 'neutral',
-        }
-      : payload.status,
-    ops: {
-      ...(payload.ops ?? {}),
-      source: 'cache',
-      ingestIntervalMinutes: Math.round(INGEST_INTERVAL_MS / 60_000),
-      lastIngestedAt,
-    },
-  }
-}
-
-async function buildFastGamePageSnapshotPayload(universeId, range) {
-  const snapshotGame = (await getLatestSnapshotGames([universeId]))[0]
-
-  if (!snapshotGame) {
-    return null
-  }
-
-  await appendTrackedUniverseIds([universeId], TRACKED_UNIVERSE_CAP)
-
-  const trackedUniverseIds = await getTrackedUniverseIds()
-  const historyMap = await getHistoryMap([universeId], getHistoryCutoffIso())
-  const peerGames = (await getLatestSnapshotGames(trackedUniverseIds))
-    .slice(0, GAME_PAGE_PEER_POOL_LIMIT)
-
-  return buildGameDetailPayload(
-    snapshotGame,
-    historyMap,
-    peerGames,
-    trackedUniverseIds,
-    buildUnavailableGameSupplementalData(snapshotGame),
-    STORE_SOURCE,
-    range,
-  )
-}
-
 await migrateLegacyJsonIfNeeded(database)
+
+if (SERVER_ENABLE_SCHEDULED_INGEST) {
+  await runScheduledIngest()
+  setInterval(() => {
+    void runScheduledIngest()
+  }, INGEST_INTERVAL_MS)
+}
 
 const server = createServer(async (request, response) => {
   const url = new URL(request.url ?? '/', `http://${request.headers.host ?? 'localhost'}`)
   const started = Date.now()
-  const requestId = randomUUID()
-  response.setHeader('X-Request-Id', requestId)
 
   try {
     if (request.method === 'GET' && url.pathname === '/health') {
-      return sendJson(response, 200, await getReadyStatus())
+      return sendJson(response, 200, {
+        ok: true,
+        trackedUniverseIds: getTrackedUniverseIds(),
+        lastIngestedAt,
+        lastIngestError,
+        scheduledIngestEnabled: SERVER_ENABLE_SCHEDULED_INGEST,
+        ingestIntervalMs: INGEST_INTERVAL_MS,
+        databasePath: DB_PATH,
+      })
     }
 
     if (request.method === 'GET' && url.pathname === '/ready') {
-      return sendJson(response, 200, await getReadyStatus())
+      const ops = getOpsMetrics()
+      return sendJson(response, ops.ok ? 200 : 503, ops)
     }
 
     if (request.method === 'GET' && url.pathname === '/api/ops/metrics') {
-      return sendJson(response, 200, await getOpsMetrics())
+      return sendJson(response, 200, getOpsMetrics())
     }
 
     if (request.method === 'GET' && url.pathname === '/api/search') {
@@ -4732,6 +4284,10 @@ const server = createServer(async (request, response) => {
       }
 
       const matches = await searchRobloxGames(query)
+      appendTrackedUniverseIds(
+        matches.slice(0, 8).map((match) => match.universeId),
+        TRACKED_UNIVERSE_CAP,
+      )
       return sendJson(response, 200, { query, matches: matches.slice(0, 8) })
     }
 
@@ -4759,7 +4315,7 @@ const server = createServer(async (request, response) => {
     }
 
     if (request.method === 'GET' && url.pathname === '/api/live/board-point') {
-      return sendJson(response, 200, await fetchBoardLivePointPayload())
+      return sendJson(response, 200, fetchBoardLivePointPayload())
     }
 
     if (request.method === 'GET' && url.pathname === '/api/live/platform-point') {
@@ -4817,35 +4373,11 @@ const server = createServer(async (request, response) => {
         return sendJson(response, 404, { error: 'Game thumbnail not found.' })
       }
 
-      const controller = new AbortController()
-      const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
-
-      try {
-        const imageResponse = await fetch(imageUrl, {
-          signal: controller.signal,
-          headers: {
-            Accept: 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
-          },
-        })
-
-        if (!imageResponse.ok) {
-          return sendJson(response, imageResponse.status, { error: 'Game thumbnail fetch failed.' })
-        }
-
-        const contentType = imageResponse.headers.get('content-type') || 'image/png'
-        const arrayBuffer = await imageResponse.arrayBuffer()
-
-        response.writeHead(
-          200,
-          buildSecurityHeaders({
-            'Content-Type': contentType,
-            'Cache-Control': 'public, max-age=300',
-          }),
-        )
-        response.end(Buffer.from(arrayBuffer))
-      } finally {
-        clearTimeout(timeoutId)
-      }
+      response.writeHead(302, {
+        Location: imageUrl,
+        'Cache-Control': 'public, max-age=300',
+      })
+      response.end()
       return
     }
 
@@ -4877,58 +4409,20 @@ const server = createServer(async (request, response) => {
 
     return sendJson(response, 404, { error: 'Not found.' })
   } catch (error) {
+    console.error('[roterminal-server] request failed', error)
     const statusCode =
       typeof error?.statusCode === 'number' ? error.statusCode : 500
-    logServerEvent('error', 'request_failed', {
-      requestId,
-      method: request.method ?? 'GET',
-      path: url.pathname,
-      query: url.search,
-      durationMs: Date.now() - started,
-      statusCode,
-      error: serializeError(error),
-      memory: getMemoryUsageSnapshot(),
-    })
     return sendJson(response, statusCode, {
       error: error instanceof Error ? error.message : 'Unknown server failure.',
-      requestId,
     })
   } finally {
     const durationMs = Date.now() - started
-    const statusCode = response.statusCode || 200
-
-    logServerEvent('info', 'request_complete', {
-      requestId,
-      method: request.method ?? 'GET',
-      path: url.pathname,
-      query: url.search,
-      statusCode,
-      durationMs,
-      memory:
-        shouldIncludeMemoryInRequestLog(url.pathname, statusCode, durationMs)
-          ? getMemoryUsageSnapshot()
-          : undefined,
-    })
+    console.log(
+      `[roterminal-server] ${request.method ?? 'GET'} ${url.pathname} ${durationMs}ms`,
+    )
   }
 })
 
 server.listen(PORT, () => {
-  logServerEvent('info', 'server_listening', {
-    port: PORT,
-    scheduledIngestEnabled: SERVER_ENABLE_SCHEDULED_INGEST,
-    memory: getMemoryUsageSnapshot(),
-  })
-
-  const cacheSweepInterval = setInterval(() => {
-    sweepAllCaches()
-  }, CACHE_SWEEP_INTERVAL_MS)
-  cacheSweepInterval.unref?.()
-
-  if (SERVER_ENABLE_SCHEDULED_INGEST) {
-    // Start ingest after the API is already serving health checks.
-    void runScheduledIngest()
-    setInterval(() => {
-      void runScheduledIngest()
-    }, INGEST_INTERVAL_MS)
-  }
+  console.log(`[roterminal-server] listening on http://localhost:${PORT}`)
 })

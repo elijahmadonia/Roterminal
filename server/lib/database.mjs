@@ -6,8 +6,14 @@ import {
   DB_PATH,
   INGEST_RUN_STALE_AFTER_MS,
   SNAPSHOT_RETENTION_MS,
-  TRACKED_UNIVERSE_CAP,
 } from '../config.mjs'
+
+function hasTableColumn(db, tableName, columnName) {
+  return db
+    .prepare(`PRAGMA table_info(${tableName})`)
+    .all()
+    .some((row) => row.name === columnName)
+}
 
 const MIGRATIONS = [
   {
@@ -500,41 +506,36 @@ const MIGRATIONS = [
     },
   },
   {
-    id: '008_platform_history_points',
+    id: '008_tracked_universe_metadata',
     up(db) {
       db.exec(`
-        CREATE TABLE IF NOT EXISTS platform_history_points (
-          metric_key TEXT NOT NULL,
-          observed_at TEXT NOT NULL,
-          playing INTEGER NOT NULL,
-          source TEXT NOT NULL,
-          imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-          PRIMARY KEY (metric_key, observed_at)
-        );
+        ALTER TABLE tracked_universes ADD COLUMN tracking_tier TEXT NOT NULL DEFAULT 'tier_d';
+        ALTER TABLE tracked_universes ADD COLUMN poll_interval_minutes INTEGER NOT NULL DEFAULT 60;
+        ALTER TABLE tracked_universes ADD COLUMN priority_score REAL NOT NULL DEFAULT 0;
+        ALTER TABLE tracked_universes ADD COLUMN last_known_playing INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE tracked_universes ADD COLUMN discovery_source TEXT NOT NULL DEFAULT 'manual';
+        ALTER TABLE tracked_universes ADD COLUMN first_discovered_at TEXT;
+        ALTER TABLE tracked_universes ADD COLUMN last_discovered_at TEXT;
+        ALTER TABLE tracked_universes ADD COLUMN last_promoted_at TEXT;
+        ALTER TABLE tracked_universes ADD COLUMN last_polled_at TEXT;
+        ALTER TABLE tracked_universes ADD COLUMN manually_pinned INTEGER NOT NULL DEFAULT 0;
 
-        CREATE INDEX IF NOT EXISTS idx_platform_history_points_observed
-          ON platform_history_points(observed_at DESC);
-      `)
-    },
-  },
-  {
-    id: '009_import_jobs',
-    up(db) {
-      db.exec(`
-        CREATE TABLE IF NOT EXISTS import_jobs (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          job_type TEXT NOT NULL,
-          payload_json TEXT NOT NULL,
-          status TEXT NOT NULL DEFAULT 'queued',
-          attempts INTEGER NOT NULL DEFAULT 0,
-          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-          started_at TEXT,
-          finished_at TEXT,
-          error_message TEXT
-        );
+        UPDATE tracked_universes
+        SET
+          first_discovered_at = COALESCE(first_discovered_at, created_at, CURRENT_TIMESTAMP),
+          last_discovered_at = COALESCE(last_discovered_at, created_at, CURRENT_TIMESTAMP),
+          discovery_source = COALESCE(discovery_source, 'manual'),
+          tracking_tier = COALESCE(tracking_tier, 'tier_d'),
+          poll_interval_minutes = COALESCE(poll_interval_minutes, 60),
+          priority_score = COALESCE(priority_score, 0),
+          last_known_playing = COALESCE(last_known_playing, 0),
+          manually_pinned = COALESCE(manually_pinned, 0);
 
-        CREATE INDEX IF NOT EXISTS idx_import_jobs_status_created
-          ON import_jobs(status, created_at ASC);
+        CREATE INDEX IF NOT EXISTS idx_tracked_universes_priority
+          ON tracked_universes(sort_order ASC, priority_score DESC, last_known_playing DESC);
+
+        CREATE INDEX IF NOT EXISTS idx_tracked_universes_due_poll
+          ON tracked_universes(tracking_tier, last_polled_at, poll_interval_minutes);
       `)
     },
   },
@@ -612,6 +613,23 @@ function mapSnapshotGame(row) {
   }
 }
 
+function mapTrackedUniverseRecord(row) {
+  return {
+    universeId: row.universe_id,
+    sortOrder: row.sort_order,
+    trackingTier: row.tracking_tier,
+    pollIntervalMinutes: row.poll_interval_minutes,
+    priorityScore: row.priority_score,
+    lastKnownPlaying: row.last_known_playing,
+    discoverySource: row.discovery_source,
+    firstDiscoveredAt: row.first_discovered_at,
+    lastDiscoveredAt: row.last_discovered_at,
+    lastPromotedAt: row.last_promoted_at,
+    lastPolledAt: row.last_polled_at,
+    manuallyPinned: Boolean(row.manually_pinned),
+  }
+}
+
 function toJsonText(value) {
   try {
     return JSON.stringify(value ?? null)
@@ -636,15 +654,79 @@ export async function createDatabase() {
     ORDER BY sort_order ASC
   `)
 
+  const getTrackedRecordsStmt = db.prepare(`
+    SELECT
+      universe_id,
+      sort_order,
+      tracking_tier,
+      poll_interval_minutes,
+      priority_score,
+      last_known_playing,
+      discovery_source,
+      first_discovered_at,
+      last_discovered_at,
+      last_promoted_at,
+      last_polled_at,
+      manually_pinned
+    FROM tracked_universes
+    ORDER BY sort_order ASC, priority_score DESC, last_known_playing DESC, universe_id ASC
+  `)
+
   const countTrackedStmt = db.prepare(`
     SELECT COUNT(*) AS total
     FROM tracked_universes
   `)
 
+  const trackedTierCountsStmt = db.prepare(`
+    SELECT
+      tracking_tier,
+      COUNT(*) AS total
+    FROM tracked_universes
+    GROUP BY tracking_tier
+    ORDER BY tracking_tier ASC
+  `)
+
+  const trackedDiscoverySourceCountsStmt = db.prepare(`
+    SELECT
+      discovery_source,
+      COUNT(*) AS total
+    FROM tracked_universes
+    GROUP BY discovery_source
+    ORDER BY total DESC, discovery_source ASC
+  `)
+
   const insertTrackedStmt = db.prepare(`
-    INSERT INTO tracked_universes (universe_id, sort_order)
-    VALUES (?, ?)
-    ON CONFLICT(universe_id) DO UPDATE SET sort_order = excluded.sort_order
+    INSERT INTO tracked_universes (
+      universe_id,
+      sort_order,
+      tracking_tier,
+      poll_interval_minutes,
+      priority_score,
+      last_known_playing,
+      discovery_source,
+      first_discovered_at,
+      last_discovered_at,
+      last_promoted_at,
+      last_polled_at,
+      manually_pinned
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(universe_id) DO UPDATE SET
+      sort_order = excluded.sort_order,
+      tracking_tier = excluded.tracking_tier,
+      poll_interval_minutes = excluded.poll_interval_minutes,
+      priority_score = excluded.priority_score,
+      last_known_playing = excluded.last_known_playing,
+      discovery_source = excluded.discovery_source,
+      first_discovered_at = CASE
+        WHEN tracked_universes.first_discovered_at IS NULL
+          THEN excluded.first_discovered_at
+        ELSE MIN(tracked_universes.first_discovered_at, excluded.first_discovered_at)
+      END,
+      last_discovered_at = MAX(tracked_universes.last_discovered_at, excluded.last_discovered_at),
+      last_promoted_at = COALESCE(excluded.last_promoted_at, tracked_universes.last_promoted_at),
+      last_polled_at = COALESCE(excluded.last_polled_at, tracked_universes.last_polled_at),
+      manually_pinned = MAX(tracked_universes.manually_pinned, excluded.manually_pinned)
   `)
 
   const deleteTrackedStmt = db.prepare(`
@@ -783,78 +865,6 @@ export async function createDatabase() {
       source = excluded.source,
       updated_at = CURRENT_TIMESTAMP
     WHERE excluded.observed_at >= platform_current_metrics.observed_at
-  `)
-
-  const getPlatformHistorySinceStmt = db.prepare(`
-    SELECT
-      observed_at,
-      playing,
-      source
-    FROM platform_history_points
-    WHERE metric_key = ? AND observed_at >= ?
-    ORDER BY observed_at ASC
-  `)
-
-  const upsertPlatformHistoryPointStmt = db.prepare(`
-    INSERT INTO platform_history_points (
-      metric_key,
-      observed_at,
-      playing,
-      source
-    )
-    VALUES (?, ?, ?, ?)
-    ON CONFLICT(metric_key, observed_at) DO UPDATE SET
-      playing = excluded.playing,
-      source = excluded.source,
-      imported_at = CURRENT_TIMESTAMP
-  `)
-
-  const enqueueImportJobStmt = db.prepare(`
-    INSERT INTO import_jobs (
-      job_type,
-      payload_json
-    )
-    VALUES (?, ?)
-  `)
-
-  const getNextQueuedImportJobStmt = db.prepare(`
-    SELECT
-      id,
-      job_type,
-      payload_json,
-      attempts,
-      created_at
-    FROM import_jobs
-    WHERE status = 'queued'
-    ORDER BY id ASC
-    LIMIT 1
-  `)
-
-  const claimImportJobStmt = db.prepare(`
-    UPDATE import_jobs
-    SET
-      status = 'running',
-      attempts = attempts + 1,
-      started_at = ?,
-      error_message = NULL
-    WHERE id = ? AND status = 'queued'
-  `)
-
-  const finishImportJobStmt = db.prepare(`
-    UPDATE import_jobs
-    SET
-      status = ?,
-      finished_at = ?,
-      error_message = ?
-    WHERE id = ?
-  `)
-
-  const importJobStatsStmt = db.prepare(`
-    SELECT
-      status,
-      COUNT(*) AS total
-    FROM import_jobs
-    GROUP BY status
   `)
 
   const insertObservationStmt = db.prepare(`
@@ -1368,6 +1378,62 @@ export async function createDatabase() {
     ORDER BY universe_id ASC, observed_at ASC
   `)
 
+  function getUniverseRootPlaceMap(universeIds) {
+    const uniqueIds = sanitizeUniverseIds(universeIds)
+
+    if (uniqueIds.length === 0) {
+      return new Map()
+    }
+
+    const placeholders = uniqueIds.map(() => '?').join(', ')
+    const metadataRows = db.prepare(`
+      SELECT gm.universe_id, gm.root_place_id
+      FROM game_metadata_history gm
+      INNER JOIN (
+        SELECT universe_id, MAX(observed_at) AS latest_observed_at
+        FROM game_metadata_history
+        WHERE universe_id IN (${placeholders}) AND root_place_id IS NOT NULL
+        GROUP BY universe_id
+      ) latest
+        ON latest.universe_id = gm.universe_id
+       AND latest.latest_observed_at = gm.observed_at
+    `).all(...uniqueIds)
+
+    const rootPlaceMap = new Map()
+
+    for (const row of metadataRows) {
+      if (row.root_place_id != null) {
+        rootPlaceMap.set(row.universe_id, row.root_place_id)
+      }
+    }
+
+    const missingUniverseIds = uniqueIds.filter((universeId) => !rootPlaceMap.has(universeId))
+
+    if (missingUniverseIds.length > 0) {
+      const missingPlaceholders = missingUniverseIds.map(() => '?').join(', ')
+      const pageMetaRows = db.prepare(`
+        SELECT pm.universe_id, pm.root_place_id
+        FROM page_meta_history pm
+        INNER JOIN (
+          SELECT universe_id, MAX(observed_at) AS latest_observed_at
+          FROM page_meta_history
+          WHERE universe_id IN (${missingPlaceholders}) AND root_place_id IS NOT NULL
+          GROUP BY universe_id
+        ) latest
+          ON latest.universe_id = pm.universe_id
+         AND latest.latest_observed_at = pm.observed_at
+      `).all(...missingUniverseIds)
+
+      for (const row of pageMetaRows) {
+        if (row.root_place_id != null) {
+          rootPlaceMap.set(row.universe_id, row.root_place_id)
+        }
+      }
+    }
+
+    return rootPlaceMap
+  }
+
   function runInTransaction(callback) {
     db.exec('BEGIN IMMEDIATE')
 
@@ -1382,6 +1448,22 @@ export async function createDatabase() {
 
   function countDailyMetrics() {
     return countDailyMetricsStmt.get().total
+  }
+
+  function getTrackedTierCounts() {
+    const rows = trackedTierCountsStmt.all()
+    return rows.reduce((counts, row) => {
+      counts[row.tracking_tier] = row.total
+      return counts
+    }, {})
+  }
+
+  function getTrackedDiscoverySourceCounts() {
+    const rows = trackedDiscoverySourceCountsStmt.all()
+    return rows.reduce((counts, row) => {
+      counts[row.discovery_source] = row.total
+      return counts
+    }, {})
   }
 
   function countMetadataHistory() {
@@ -1508,19 +1590,79 @@ export async function createDatabase() {
     return getTrackedStmt.all().map((row) => row.universe_id)
   }
 
-  function replaceTrackedUniverseIdsInPlace(universeIds) {
-    const uniqueIds = sanitizeUniverseIds(universeIds)
+  function getTrackedUniverseRecords() {
+    return getTrackedRecordsStmt.all().map(mapTrackedUniverseRecord)
+  }
 
-    deleteTrackedStmt.run()
-    uniqueIds.forEach((universeId, index) => {
-      insertTrackedStmt.run(universeId, index)
+  function normalizeTrackedUniverseRecords(records) {
+    const nowIso = new Date().toISOString()
+    return sanitizeUniverseIds(records.map((record) => record?.universeId)).map((universeId, index) => {
+      const record = records.find((entry) => Number(entry?.universeId) === universeId) ?? {}
+      return {
+        universeId,
+        sortOrder: Number.isFinite(record.sortOrder) ? Number(record.sortOrder) : index,
+        trackingTier: typeof record.trackingTier === 'string' && record.trackingTier.length > 0
+          ? record.trackingTier
+          : 'tier_d',
+        pollIntervalMinutes:
+          Number.isFinite(record.pollIntervalMinutes) && Number(record.pollIntervalMinutes) > 0
+            ? Number(record.pollIntervalMinutes)
+            : 60,
+        priorityScore: Number.isFinite(record.priorityScore) ? Number(record.priorityScore) : 0,
+        lastKnownPlaying:
+          Number.isFinite(record.lastKnownPlaying) && Number(record.lastKnownPlaying) >= 0
+            ? Number(record.lastKnownPlaying)
+            : 0,
+        discoverySource:
+          typeof record.discoverySource === 'string' && record.discoverySource.length > 0
+            ? record.discoverySource
+            : 'manual',
+        firstDiscoveredAt: record.firstDiscoveredAt ?? nowIso,
+        lastDiscoveredAt: record.lastDiscoveredAt ?? record.firstDiscoveredAt ?? nowIso,
+        lastPromotedAt: record.lastPromotedAt ?? null,
+        lastPolledAt: record.lastPolledAt ?? null,
+        manuallyPinned: record.manuallyPinned ? 1 : 0,
+      }
     })
   }
 
-  function replaceTrackedUniverseIds(universeIds) {
+  function replaceTrackedUniverseRecords(records) {
+    const normalizedRecords = normalizeTrackedUniverseRecords(records)
+
     runInTransaction(() => {
-      replaceTrackedUniverseIdsInPlace(universeIds)
+      deleteTrackedStmt.run()
+      normalizedRecords.forEach((record, index) => {
+        insertTrackedStmt.run(
+          record.universeId,
+          Number.isFinite(record.sortOrder) ? record.sortOrder : index,
+          record.trackingTier,
+          record.pollIntervalMinutes,
+          record.priorityScore,
+          record.lastKnownPlaying,
+          record.discoverySource,
+          record.firstDiscoveredAt,
+          record.lastDiscoveredAt,
+          record.lastPromotedAt,
+          record.lastPolledAt,
+          record.manuallyPinned,
+        )
+      })
     })
+
+    return normalizedRecords.map((record) => record.universeId)
+  }
+
+  function replaceTrackedUniverseIds(universeIds) {
+    const existingById = new Map(
+      getTrackedUniverseRecords().map((record) => [record.universeId, record]),
+    )
+    const records = sanitizeUniverseIds(universeIds).map((universeId, index) => ({
+      ...(existingById.get(universeId) ?? {}),
+      universeId,
+      sortOrder: index,
+    }))
+
+    replaceTrackedUniverseRecords(records)
   }
 
   function appendTrackedUniverseIds(universeIds, maxCount = Number.POSITIVE_INFINITY) {
@@ -1530,171 +1672,24 @@ export async function createDatabase() {
       return getTrackedUniverseIds()
     }
 
-    const existingIds = getTrackedUniverseIds()
+    const existingRecords = getTrackedUniverseRecords()
+    const existingById = new Map(existingRecords.map((record) => [record.universeId, record]))
     const dedupedIds = [
-      ...existingIds.filter((universeId) => !incomingIds.includes(universeId)),
+      ...existingRecords.map((record) => record.universeId).filter((universeId) => !incomingIds.includes(universeId)),
       ...incomingIds,
     ]
     const limitedIds = Number.isFinite(maxCount)
       ? dedupedIds.slice(-Math.max(Math.floor(maxCount), 1))
       : dedupedIds
+    const nextRecords = limitedIds.map((universeId, index) => ({
+      ...(existingById.get(universeId) ?? {}),
+      universeId,
+      sortOrder: index,
+      lastDiscoveredAt: existingById.get(universeId)?.lastDiscoveredAt ?? new Date().toISOString(),
+    }))
 
-    replaceTrackedUniverseIdsInPlace(limitedIds)
+    replaceTrackedUniverseRecords(nextRecords)
     return limitedIds
-  }
-
-  function importHistoryBundle(
-    {
-      catalogEntries = [],
-      observations = [],
-      trackedUniverseIds = [],
-      replaceTracked = false,
-      trackedLimit = TRACKED_UNIVERSE_CAP,
-      defaultSource = 'history_import',
-    } = {},
-  ) {
-    const catalogByUniverseId = new Map()
-    let catalogUpsertedCount = 0
-    let observationsReceivedCount = 0
-    let observationsInsertedCount = 0
-    const latestObservationByUniverseId = new Map()
-
-    runInTransaction(() => {
-      for (const entry of catalogEntries) {
-        const universeId = Number(entry?.universeId ?? entry?.universe_id)
-
-        if (!Number.isFinite(universeId) || universeId <= 0) {
-          continue
-        }
-
-        const catalogEntry = {
-          universeId,
-          name: String(entry?.name ?? `Universe ${universeId}`),
-          creatorName: String(entry?.creatorName ?? entry?.creator_name ?? 'Unknown creator'),
-          creatorType: String(entry?.creatorType ?? entry?.creator_type ?? 'Unknown'),
-          genre: String(entry?.genre ?? 'Unclassified'),
-          firstSeenAt: String(entry?.firstSeenAt ?? entry?.first_seen_at ?? new Date().toISOString()),
-          lastSeenAt: String(entry?.lastSeenAt ?? entry?.last_seen_at ?? new Date().toISOString()),
-          lastGameUpdatedAt: String(
-            entry?.lastGameUpdatedAt ?? entry?.last_game_updated_at ?? entry?.lastSeenAt ?? entry?.last_seen_at ?? new Date().toISOString(),
-          ),
-        }
-
-        upsertUniverseCatalogStmt.run(
-          catalogEntry.universeId,
-          catalogEntry.name,
-          catalogEntry.creatorName,
-          catalogEntry.creatorType,
-          catalogEntry.genre,
-          catalogEntry.firstSeenAt,
-          catalogEntry.lastSeenAt,
-          catalogEntry.lastGameUpdatedAt,
-        )
-
-        catalogByUniverseId.set(universeId, catalogEntry)
-        catalogUpsertedCount += 1
-      }
-
-      for (const entry of observations) {
-        const universeId = Number(entry?.universeId ?? entry?.universe_id)
-        const observedAt = String(entry?.observedAt ?? entry?.observed_at ?? '')
-        const favoritedCountRaw = entry?.favoritedCount ?? entry?.favorited_count
-
-        if (!Number.isFinite(universeId) || universeId <= 0 || observedAt.length === 0) {
-          continue
-        }
-
-        observationsReceivedCount += 1
-
-        const catalogEntry = catalogByUniverseId.get(universeId) ?? {
-          universeId,
-          name: String(entry?.name ?? `Universe ${universeId}`),
-          creatorName: String(entry?.creatorName ?? entry?.creator_name ?? 'Unknown creator'),
-          creatorType: String(entry?.creatorType ?? entry?.creator_type ?? 'Unknown'),
-          genre: String(entry?.genre ?? 'Unclassified'),
-          firstSeenAt: observedAt,
-          lastSeenAt: observedAt,
-          lastGameUpdatedAt: String(entry?.updated ?? entry?.gameUpdatedAt ?? entry?.game_updated_at ?? observedAt),
-        }
-
-        if (!catalogByUniverseId.has(universeId)) {
-          upsertUniverseCatalogStmt.run(
-            catalogEntry.universeId,
-            catalogEntry.name,
-            catalogEntry.creatorName,
-            catalogEntry.creatorType,
-            catalogEntry.genre,
-            catalogEntry.firstSeenAt,
-            catalogEntry.lastSeenAt,
-            catalogEntry.lastGameUpdatedAt,
-          )
-          catalogByUniverseId.set(universeId, catalogEntry)
-        }
-
-        const latestKnown = latestObservationByUniverseId.get(universeId)
-        if (
-          !latestKnown ||
-          new Date(observedAt).getTime() >= new Date(latestKnown.observedAt).getTime()
-        ) {
-          latestObservationByUniverseId.set(universeId, {
-            observedAt,
-            playing: Number(entry?.playing) || 0,
-            visits: entry?.visits == null ? 0 : Number(entry.visits) || 0,
-            favoritedCount: favoritedCountRaw == null ? 0 : Number(favoritedCountRaw) || 0,
-            approval: entry?.approval == null ? 0 : Number(entry.approval) || 0,
-            gameUpdatedAt: String(
-              entry?.updated ?? entry?.gameUpdatedAt ?? entry?.game_updated_at ?? observedAt,
-            ),
-            source: String(entry?.source ?? defaultSource),
-          })
-        }
-
-        const insertResult = insertObservationStmt.run(
-          universeId,
-          observedAt,
-          Number(entry?.playing) || 0,
-          entry?.visits == null ? 0 : Number(entry.visits) || 0,
-          favoritedCountRaw == null ? 0 : Number(favoritedCountRaw) || 0,
-          entry?.approval == null ? 0 : Number(entry.approval) || 0,
-          String(entry?.updated ?? entry?.gameUpdatedAt ?? entry?.game_updated_at ?? observedAt),
-          String(entry?.source ?? defaultSource),
-        )
-
-        if ((insertResult.changes ?? 0) > 0) {
-          observationsInsertedCount += 1
-        }
-      }
-
-      for (const [universeId, latest] of latestObservationByUniverseId.entries()) {
-        upsertUniverseCurrentMetricsStmt.run(
-          universeId,
-          latest.observedAt,
-          latest.playing,
-          latest.visits,
-          latest.favoritedCount,
-          latest.approval,
-          latest.gameUpdatedAt,
-          latest.source,
-        )
-      }
-
-      const sanitizedTrackedIds = sanitizeUniverseIds(trackedUniverseIds)
-      if (sanitizedTrackedIds.length > 0) {
-        if (replaceTracked) {
-          replaceTrackedUniverseIds(sanitizedTrackedIds.slice(0, trackedLimit))
-        } else {
-          appendTrackedUniverseIds(sanitizedTrackedIds, trackedLimit)
-        }
-      }
-    })
-
-    return {
-      catalogUpsertedCount,
-      observationsReceivedCount,
-      observationsInsertedCount,
-      currentMetricsUpsertedCount: latestObservationByUniverseId.size,
-      trackedUniverseCount: getTrackedUniverseIds().length,
-    }
   }
 
   function getHistoryMap(universeIds, cutoffIso) {
@@ -1853,127 +1848,6 @@ export async function createDatabase() {
       Math.round(point.value),
       point.source ?? 'live',
     )
-  }
-
-  function getPlatformHistoryPoints(cutoffIso) {
-    const rows = getPlatformHistorySinceStmt.all('global', cutoffIso)
-    return rows.map((row) => ({
-      timestamp: row.observed_at,
-      value: row.playing,
-      source: row.source,
-    }))
-  }
-
-  function recordPlatformHistoryPoints(points, source = 'live') {
-    if (!Array.isArray(points) || points.length === 0) {
-      return 0
-    }
-
-    let importedCount = 0
-    let latestPoint = null
-
-    runInTransaction(() => {
-      for (const point of points) {
-        const timestamp = String(point?.timestamp ?? point?.observedAt ?? point?.observed_at ?? '')
-        const value = Number(point?.value ?? point?.playing)
-
-        if (!timestamp || !Number.isFinite(value)) {
-          continue
-        }
-
-        upsertPlatformHistoryPointStmt.run(
-          'global',
-          timestamp,
-          Math.round(value),
-          String(point?.source ?? source),
-        )
-        importedCount += 1
-
-        if (!latestPoint || Date.parse(timestamp) >= Date.parse(latestPoint.timestamp)) {
-          latestPoint = {
-            timestamp,
-            value,
-            source: String(point?.source ?? source),
-          }
-        }
-      }
-
-      if (latestPoint) {
-        recordPlatformCurrentMetric(latestPoint)
-      }
-    })
-
-    return importedCount
-  }
-
-  function importPlatformHistory(
-    points = [],
-    {
-      defaultSource = 'platform_history_import',
-    } = {},
-  ) {
-    return {
-      importedCount: recordPlatformHistoryPoints(points, defaultSource),
-    }
-  }
-
-  function enqueueImportJob(jobType, payload) {
-    const result = enqueueImportJobStmt.run(
-      jobType,
-      JSON.stringify(payload ?? {}),
-    )
-
-    return result.lastInsertRowid
-  }
-
-  function claimNextImportJob() {
-    const row = getNextQueuedImportJobStmt.get()
-
-    if (!row) {
-      return null
-    }
-
-    const startedAt = new Date().toISOString()
-    const result = claimImportJobStmt.run(startedAt, row.id)
-
-    if ((result.changes ?? 0) === 0) {
-      return null
-    }
-
-    return {
-      id: row.id,
-      jobType: row.job_type,
-      attempts: row.attempts + 1,
-      createdAt: row.created_at,
-      payload: JSON.parse(row.payload_json),
-    }
-  }
-
-  function finishImportJob(id, { status = 'completed', errorMessage = null } = {}) {
-    finishImportJobStmt.run(
-      status,
-      new Date().toISOString(),
-      errorMessage,
-      id,
-    )
-  }
-
-  function getImportJobStats() {
-    const rows = importJobStatsStmt.all()
-    const stats = {
-      queued: 0,
-      running: 0,
-      completed: 0,
-      failed: 0,
-    }
-
-    for (const row of rows) {
-      if (Object.hasOwn(stats, row.status)) {
-        stats[row.status] = row.total
-      }
-    }
-
-    return stats
   }
 
   function searchLocalGames(query, limit = 8) {
@@ -2475,29 +2349,26 @@ export async function createDatabase() {
     countSnapshots,
     countTrackedUniverseIds: () => countTrackedStmt.get().total,
     appendTrackedUniverseIds,
-    claimNextImportJob,
-    enqueueImportJob,
+    getTrackedDiscoverySourceCounts,
+    getTrackedTierCounts,
     finishExternalHistoryImportRun,
-    finishImportJob,
     finishIngestRun,
     getActiveIngestLease,
     getHistoryMap,
-    getImportJobStats,
     getLatestIngestRun,
     getLatestSnapshotGames,
     getPlatformCurrentMetric,
-    getPlatformHistoryPoints,
+    getTrackedUniverseRecords,
+    getUniverseRootPlaceMap,
     getTrackedUniverseIds,
-    importHistoryBundle,
-    importPlatformHistory,
     importLegacySnapshot,
     recordGamePageSnapshot,
     recordPlatformCurrentMetric,
-    recordPlatformHistoryPoints,
     recordExternalHistory,
     recordSnapshots,
     recoverStaleIngestRuns,
     releaseIngestLease,
+    replaceTrackedUniverseRecords,
     replaceTrackedUniverseIds,
     searchLocalGames,
     startExternalHistoryImportRun,

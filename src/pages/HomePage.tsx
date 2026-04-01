@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { fetchPlatformLivePoint } from '../api/roblox'
 import { CategoryPerformanceMap } from '../components/market-ui/CategoryPerformanceMap'
 import { GamesOverviewTable } from '../components/market-ui/GamesOverviewTable'
@@ -32,7 +32,7 @@ const HOME_WINDOW_OPTIONS = [
   { label: '1W', secs: 7 * 24 * 60 * 60 },
   { label: '1M', secs: 30 * 24 * 60 * 60 },
 ] as const
-const HOME_TABLE_ROW_LIMIT = 25
+const HOME_TABLE_BATCH_SIZE = 25
 const TOP_THREE_SERIES_COLORS = [
   TOKENS.colors.accent1,
   'rgb(216, 151, 31)',
@@ -117,6 +117,15 @@ export default function HomePage({
   const [gamesView, setGamesView] = useState<
     'Top Games' | 'Trending' | 'Gainers' | 'Losers' | 'Breakouts'
   >('Top Games')
+  const [visibleTableRowCount, setVisibleTableRowCount] = useState(HOME_TABLE_BATCH_SIZE)
+  const tableLoadMoreRef = useRef<HTMLDivElement | null>(null)
+  const handleGamesViewChange = useCallback(
+    (nextView: 'Top Games' | 'Trending' | 'Gainers' | 'Losers' | 'Breakouts') => {
+      setGamesView(nextView)
+      setVisibleTableRowCount(HOME_TABLE_BATCH_SIZE)
+    },
+    [],
+  )
   const activeHeroWindow =
     HOME_WINDOW_OPTIONS.find((option) => option.label === heroRange) ?? HOME_WINDOW_OPTIONS[0]
   const platformHeroRange: ChartRange = heroRange === 'Live' ? '1h' : '24h'
@@ -204,7 +213,7 @@ export default function HomePage({
   }
 
   const topLeaderboard = useMemo(
-    () => (liveBoard?.leaderboard ?? []).slice(0, 100),
+    () => liveBoard?.leaderboard ?? [],
     [liveBoard?.leaderboard],
   )
   const topFiveLeaderboard = useMemo(
@@ -339,14 +348,10 @@ export default function HomePage({
         ? sortedGames.filter(predicate)
         : sortedGames
 
-      if (prioritized.length >= HOME_TABLE_ROW_LIMIT) {
-        return prioritized.slice(0, HOME_TABLE_ROW_LIMIT)
-      }
-
       const selectedIds = new Set(prioritized.map((game) => game.universeId))
       const fallback = sortedGames.filter((game) => !selectedIds.has(game.universeId))
 
-      return [...prioritized, ...fallback].slice(0, HOME_TABLE_ROW_LIMIT)
+      return [...prioritized, ...fallback]
     },
     [],
   )
@@ -514,6 +519,43 @@ export default function HomePage({
     }
   }, [breakoutRows, gamesView, topGainerRows, topGamesRows, topLoserRows, trendingRows])
 
+  const visibleTableRows = useMemo(
+    () => tableConfig.rows.slice(0, visibleTableRowCount),
+    [tableConfig.rows, visibleTableRowCount],
+  )
+  const hasMoreTableRows = visibleTableRowCount < tableConfig.rows.length
+
+  useEffect(() => {
+    const sentinel = tableLoadMoreRef.current
+
+    if (!sentinel || !hasMoreTableRows) {
+      return
+    }
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (!entries.some((entry) => entry.isIntersecting)) {
+          return
+        }
+
+        setVisibleTableRowCount((current) =>
+          Math.min(current + HOME_TABLE_BATCH_SIZE, tableConfig.rows.length),
+        )
+      },
+      {
+        root: null,
+        rootMargin: '320px 0px',
+        threshold: 0,
+      },
+    )
+
+    observer.observe(sentinel)
+
+    return () => {
+      observer.disconnect()
+    }
+  }, [hasMoreTableRows, tableConfig.rows.length])
+
   const categoryMapSections = useMemo(() => {
     if (topLeaderboard.length === 0) return []
 
@@ -661,7 +703,7 @@ export default function HomePage({
                     lineHeight: TOKENS.typography.body3.lineHeight,
                   }}
                 >
-                  Search moved to the left rail. The board below shows {Math.min(HOME_TABLE_ROW_LIMIT, topLeaderboard.length)} rows from the current live index.
+                  Search moved to the left rail. The board below loads {Math.min(HOME_TABLE_BATCH_SIZE, topLeaderboard.length)} games first, then keeps adding more as you scroll.
                 </div>
               </div>
 
@@ -735,7 +777,7 @@ export default function HomePage({
                   ['Top Games', 'Trending', 'Gainers', 'Losers', 'Breakouts'] as const
                 }
                 value={gamesView}
-                onChange={setGamesView}
+                onChange={handleGamesViewChange}
               />
 
               <div
@@ -745,17 +787,33 @@ export default function HomePage({
                   lineHeight: TOKENS.typography.body3.lineHeight,
                 }}
               >
-                Showing {Math.min(tableConfig.rows.length, HOME_TABLE_ROW_LIMIT)} of {topLeaderboard.length} indexed games on this board view.
+                Showing {visibleTableRows.length} of {tableConfig.rows.length} indexed games on this board view.
               </div>
 
               <GamesOverviewTable
                 variant="compact"
-                rows={tableConfig.rows}
+                rows={visibleTableRows}
                 loading={isBoardLoading && topLeaderboard.length === 0}
                 skeletonRowCount={9}
                 onRowClick={(row) => onOpenGame({ universeId: row.universeId, name: row.name })}
                 {...tableConfig.props}
               />
+
+              {hasMoreTableRows ? (
+                <div
+                  ref={tableLoadMoreRef}
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'center',
+                    padding: '8px 0 0',
+                    color: TOKENS.colors.neutral3,
+                    fontSize: TOKENS.typography.body3.size,
+                    lineHeight: TOKENS.typography.body3.lineHeight,
+                  }}
+                >
+                  Loading more games as you scroll.
+                </div>
+              ) : null}
             </div>
 
             <div style={{ gridColumn: '1 / -1' }}>

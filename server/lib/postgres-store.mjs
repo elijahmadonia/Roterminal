@@ -194,6 +194,53 @@ async function applyMigrations(pool) {
       )
     `,
     `
+      ALTER TABLE tracked_universes
+      ADD COLUMN IF NOT EXISTS tracking_tier TEXT NOT NULL DEFAULT 'tier_d'
+    `,
+    `
+      ALTER TABLE tracked_universes
+      ADD COLUMN IF NOT EXISTS poll_interval_minutes INTEGER NOT NULL DEFAULT 60
+    `,
+    `
+      ALTER TABLE tracked_universes
+      ADD COLUMN IF NOT EXISTS priority_score DOUBLE PRECISION NOT NULL DEFAULT 0
+    `,
+    `
+      ALTER TABLE tracked_universes
+      ADD COLUMN IF NOT EXISTS last_known_playing INTEGER NOT NULL DEFAULT 0
+    `,
+    `
+      ALTER TABLE tracked_universes
+      ADD COLUMN IF NOT EXISTS discovery_source TEXT NOT NULL DEFAULT 'manual'
+    `,
+    `
+      ALTER TABLE tracked_universes
+      ADD COLUMN IF NOT EXISTS first_discovered_at TIMESTAMPTZ
+    `,
+    `
+      ALTER TABLE tracked_universes
+      ADD COLUMN IF NOT EXISTS last_discovered_at TIMESTAMPTZ
+    `,
+    `
+      ALTER TABLE tracked_universes
+      ADD COLUMN IF NOT EXISTS last_promoted_at TIMESTAMPTZ
+    `,
+    `
+      ALTER TABLE tracked_universes
+      ADD COLUMN IF NOT EXISTS last_polled_at TIMESTAMPTZ
+    `,
+    `
+      ALTER TABLE tracked_universes
+      ADD COLUMN IF NOT EXISTS manually_pinned BOOLEAN NOT NULL DEFAULT FALSE
+    `,
+    `
+      UPDATE tracked_universes
+      SET
+        first_discovered_at = COALESCE(first_discovered_at, updated_at, NOW()),
+        last_discovered_at = COALESCE(last_discovered_at, updated_at, NOW())
+      WHERE first_discovered_at IS NULL OR last_discovered_at IS NULL
+    `,
+    `
       CREATE TABLE IF NOT EXISTS universe_catalog (
         universe_id BIGINT PRIMARY KEY,
         name TEXT NOT NULL,
@@ -286,6 +333,14 @@ async function applyMigrations(pool) {
       ON tracked_universes (sort_order ASC)
     `,
     `
+      CREATE INDEX IF NOT EXISTS tracked_universes_priority_idx
+      ON tracked_universes (sort_order ASC, priority_score DESC, last_known_playing DESC)
+    `,
+    `
+      CREATE INDEX IF NOT EXISTS tracked_universes_due_poll_idx
+      ON tracked_universes (tracking_tier, last_polled_at, poll_interval_minutes)
+    `,
+    `
       CREATE INDEX IF NOT EXISTS universe_observations_universe_observed_idx
       ON universe_observations (universe_id, observed_at ASC)
     `,
@@ -337,30 +392,114 @@ export async function createPostgresStore() {
     return result.rows.map((row) => Number(row.universe_id)).filter((value) => Number.isFinite(value))
   }
 
-  async function replaceTrackedUniverseIds(universeIds) {
-    const sanitizedIds = sanitizeUniverseIds(universeIds)
+  async function getTrackedUniverseRecords() {
+    const result = await pool.query(`
+      SELECT
+        universe_id,
+        sort_order,
+        tracking_tier,
+        poll_interval_minutes,
+        priority_score,
+        last_known_playing,
+        discovery_source,
+        first_discovered_at,
+        last_discovered_at,
+        last_promoted_at,
+        last_polled_at,
+        manually_pinned
+      FROM tracked_universes
+      ORDER BY sort_order ASC, priority_score DESC, last_known_playing DESC, universe_id ASC
+    `)
 
-    await withTransaction(pool, async (client) => {
-      await client.query('DELETE FROM tracked_universes')
+    return result.rows.map((row) => ({
+      universeId: Number(row.universe_id),
+      sortOrder: Number(row.sort_order) || 0,
+      trackingTier: row.tracking_tier ?? 'tier_d',
+      pollIntervalMinutes: Number(row.poll_interval_minutes) || 60,
+      priorityScore: Number(row.priority_score) || 0,
+      lastKnownPlaying: Number(row.last_known_playing) || 0,
+      discoverySource: row.discovery_source ?? 'manual',
+      firstDiscoveredAt: normalizeTimestamp(row.first_discovered_at),
+      lastDiscoveredAt: normalizeTimestamp(row.last_discovered_at),
+      lastPromotedAt: row.last_promoted_at ? normalizeTimestamp(row.last_promoted_at) : null,
+      lastPolledAt: row.last_polled_at ? normalizeTimestamp(row.last_polled_at) : null,
+      manuallyPinned: Boolean(row.manually_pinned),
+    }))
+  }
 
-      if (sanitizedIds.length === 0) {
-        return
+  async function getTrackedTierCounts() {
+    const result = await pool.query(`
+      SELECT tracking_tier, COUNT(*)::INT AS total
+      FROM tracked_universes
+      GROUP BY tracking_tier
+      ORDER BY tracking_tier ASC
+    `)
+
+    return result.rows.reduce((counts, row) => {
+      counts[row.tracking_tier] = Number(row.total) || 0
+      return counts
+    }, {})
+  }
+
+  async function getTrackedDiscoverySourceCounts() {
+    const result = await pool.query(`
+      SELECT discovery_source, COUNT(*)::INT AS total
+      FROM tracked_universes
+      GROUP BY discovery_source
+      ORDER BY total DESC, discovery_source ASC
+    `)
+
+    return result.rows.reduce((counts, row) => {
+      counts[row.discovery_source] = Number(row.total) || 0
+      return counts
+    }, {})
+  }
+
+  function normalizeTrackedUniverseRecords(records) {
+    const nowIso = new Date().toISOString()
+    return sanitizeUniverseIds(records.map((record) => record?.universeId)).map((universeId, index) => {
+      const record = records.find((entry) => Number(entry?.universeId) === universeId) ?? {}
+      return {
+        universeId,
+        sortOrder: Number.isFinite(record.sortOrder) ? Number(record.sortOrder) : index,
+        trackingTier:
+          typeof record.trackingTier === 'string' && record.trackingTier.length > 0
+            ? record.trackingTier
+            : 'tier_d',
+        pollIntervalMinutes:
+          Number.isFinite(record.pollIntervalMinutes) && Number(record.pollIntervalMinutes) > 0
+            ? Number(record.pollIntervalMinutes)
+            : 60,
+        priorityScore: Number.isFinite(record.priorityScore) ? Number(record.priorityScore) : 0,
+        lastKnownPlaying:
+          Number.isFinite(record.lastKnownPlaying) && Number(record.lastKnownPlaying) >= 0
+            ? Number(record.lastKnownPlaying)
+            : 0,
+        discoverySource:
+          typeof record.discoverySource === 'string' && record.discoverySource.length > 0
+            ? record.discoverySource
+            : 'manual',
+        firstDiscoveredAt: record.firstDiscoveredAt ?? nowIso,
+        lastDiscoveredAt: record.lastDiscoveredAt ?? record.firstDiscoveredAt ?? nowIso,
+        lastPromotedAt: record.lastPromotedAt ?? null,
+        lastPolledAt: record.lastPolledAt ?? null,
+        manuallyPinned: Boolean(record.manuallyPinned),
       }
-
-      const rows = sanitizedIds.map((universeId, index) => [universeId, index])
-      await client.query(
-        `
-          INSERT INTO tracked_universes (universe_id, sort_order)
-          VALUES ${buildValuesClause(rows.length, 2)}
-          ON CONFLICT (universe_id) DO UPDATE SET
-            sort_order = EXCLUDED.sort_order,
-            updated_at = NOW()
-        `,
-        flattenRows(rows),
-      )
     })
+  }
 
-    return sanitizedIds
+  async function replaceTrackedUniverseIds(universeIds) {
+    const existingById = new Map(
+      (await getTrackedUniverseRecords()).map((record) => [record.universeId, record]),
+    )
+    const records = sanitizeUniverseIds(universeIds).map((universeId, index) => ({
+      ...(existingById.get(universeId) ?? {}),
+      universeId,
+      sortOrder: index,
+    }))
+
+    await replaceTrackedUniverseRecords(records)
+    return records.map((record) => record.universeId)
   }
 
   async function appendTrackedUniverseIds(universeIds, maxCount = Number.POSITIVE_INFINITY) {
@@ -381,6 +520,69 @@ export async function createPostgresStore() {
 
     await replaceTrackedUniverseIds(limitedIds)
     return limitedIds
+  }
+
+  async function replaceTrackedUniverseRecords(records) {
+    const normalizedRecords = normalizeTrackedUniverseRecords(records)
+
+    await withTransaction(pool, async (client) => {
+      await client.query('DELETE FROM tracked_universes')
+
+      if (normalizedRecords.length === 0) {
+        return
+      }
+
+      const rows = normalizedRecords.map((record, index) => [
+        record.universeId,
+        Number.isFinite(record.sortOrder) ? Number(record.sortOrder) : index,
+        record.trackingTier,
+        record.pollIntervalMinutes,
+        record.priorityScore,
+        record.lastKnownPlaying,
+        record.discoverySource,
+        record.firstDiscoveredAt,
+        record.lastDiscoveredAt,
+        record.lastPromotedAt,
+        record.lastPolledAt,
+        record.manuallyPinned,
+      ])
+
+      await client.query(
+        `
+          INSERT INTO tracked_universes (
+            universe_id,
+            sort_order,
+            tracking_tier,
+            poll_interval_minutes,
+            priority_score,
+            last_known_playing,
+            discovery_source,
+            first_discovered_at,
+            last_discovered_at,
+            last_promoted_at,
+            last_polled_at,
+            manually_pinned
+          )
+          VALUES ${buildValuesClause(rows.length, 12)}
+          ON CONFLICT (universe_id) DO UPDATE SET
+            sort_order = EXCLUDED.sort_order,
+            tracking_tier = EXCLUDED.tracking_tier,
+            poll_interval_minutes = EXCLUDED.poll_interval_minutes,
+            priority_score = EXCLUDED.priority_score,
+            last_known_playing = EXCLUDED.last_known_playing,
+            discovery_source = EXCLUDED.discovery_source,
+            first_discovered_at = LEAST(tracked_universes.first_discovered_at, EXCLUDED.first_discovered_at),
+            last_discovered_at = GREATEST(tracked_universes.last_discovered_at, EXCLUDED.last_discovered_at),
+            last_promoted_at = COALESCE(EXCLUDED.last_promoted_at, tracked_universes.last_promoted_at),
+            last_polled_at = COALESCE(EXCLUDED.last_polled_at, tracked_universes.last_polled_at),
+            manually_pinned = EXCLUDED.manually_pinned,
+            updated_at = NOW()
+        `,
+        flattenRows(rows),
+      )
+    })
+
+    return normalizedRecords.map((record) => record.universeId)
   }
 
   async function countCatalogEntries() {
@@ -1058,6 +1260,9 @@ export async function createPostgresStore() {
     getLatestSnapshotGames,
     getPlatformCurrentMetric,
     getPlatformHistoryPoints,
+    getTrackedDiscoverySourceCounts,
+    getTrackedTierCounts,
+    getTrackedUniverseRecords,
     getTrackedUniverseIds,
     importLegacySnapshot,
     recordGamePageSnapshot,
@@ -1065,6 +1270,7 @@ export async function createPostgresStore() {
     recordPlatformHistoryPoints,
     recordSnapshots,
     recoverStaleIngestRuns,
+    replaceTrackedUniverseRecords,
     replaceTrackedUniverseIds,
     searchLocalGames,
     startIngestRun,

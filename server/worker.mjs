@@ -1,13 +1,29 @@
 import crypto from 'node:crypto'
 
 import {
+  DISCOVERY_LIVE_POLL_LIMIT,
   DEFAULT_TRACKED_IDS,
+  DISCOVERY_CREATOR_EXPANSION_LIMIT,
+  DISCOVERY_CREATOR_GAME_LIMIT,
   INGEST_LEASE_TTL_MS,
   INGEST_INTERVAL_MS,
   MAX_FETCH_RETRIES,
   ROBLOX_SECURITY_COOKIES,
   RETRY_BASE_DELAY_MS,
   REQUEST_TIMEOUT_MS,
+  SEARCH_DISCOVERY_QUERY_LIMIT,
+  SEARCH_DISCOVERY_RESULT_LIMIT,
+  TIER_A_POLL_MINUTES,
+  TIER_A_POLL_BUDGET,
+  TIER_B_POLL_MINUTES,
+  TIER_B_POLL_BUDGET,
+  TIER_C_POLL_MINUTES,
+  TIER_C_POLL_BUDGET,
+  TIER_D_POLL_MINUTES,
+  TIER_D_POLL_BUDGET,
+  TRACKING_FAST_LANE_CCU,
+  TRACKING_PRIORITY_CCU,
+  TRACKING_WARM_CCU,
   TRACKED_UNIVERSE_CAP,
   UNIVERSE_FETCH_BATCH_CONCURRENCY,
 } from './config.mjs'
@@ -28,6 +44,40 @@ const ROBLOX_AUTH_COOKIE_HEADERS = [...new Set(
       : `.ROBLOSECURITY=${cookieValue}`,
   ),
 )]
+const SEARCH_DISCOVERY_SEED_TERMS = [
+  'obby',
+  'simulator',
+  'tycoon',
+  'roleplay',
+  'anime',
+  'horror',
+  'survival',
+  'battlegrounds',
+  'rng',
+  'dress up',
+  'story',
+  'clicker',
+  'tower defense',
+  'fighting',
+  'escape',
+]
+const SEARCH_DISCOVERY_STOPWORDS = new Set([
+  'the',
+  'and',
+  'with',
+  'for',
+  'new',
+  'update',
+  'official',
+  'beta',
+  'alpha',
+  'game',
+  'roblox',
+  'roleplay',
+  'story',
+  'simulator',
+  'tycoon',
+])
 
 const database = await createStore()
 await migrateLegacyJsonIfNeeded(database)
@@ -35,6 +85,7 @@ await database.recoverStaleIngestRuns()
 
 const schedulerOwnerId = `worker:${process.pid}:${crypto.randomUUID()}`
 let scheduledIngestInFlight = false
+let searchDiscoveryCursor = 0
 
 function sleep(ms) {
   return new Promise((resolve) => {
@@ -144,7 +195,179 @@ function dedupeUniverseIds(...universeIdSets) {
   return [...new Set(universeIdSets.flatMap((items) => items ?? []).map((value) => Number(value)).filter((value) => Number.isFinite(value) && value > 0))]
 }
 
-async function fetchUniverseGames(universeIds) {
+function isoNow() {
+  return new Date().toISOString()
+}
+
+function minutesSince(isoTimestamp, nowMs = Date.now()) {
+  if (!isoTimestamp) {
+    return Number.POSITIVE_INFINITY
+  }
+
+  const parsed = Date.parse(isoTimestamp)
+  if (Number.isNaN(parsed)) {
+    return Number.POSITIVE_INFINITY
+  }
+
+  return Math.max((nowMs - parsed) / 60_000, 0)
+}
+
+function getTrackingTier(playing) {
+  if (playing >= TRACKING_FAST_LANE_CCU) {
+    return 'tier_a'
+  }
+  if (playing >= TRACKING_PRIORITY_CCU) {
+    return 'tier_b'
+  }
+  if (playing >= TRACKING_WARM_CCU) {
+    return 'tier_c'
+  }
+  return 'tier_d'
+}
+
+function getPollIntervalMinutesForTier(trackingTier) {
+  if (trackingTier === 'tier_a') return TIER_A_POLL_MINUTES
+  if (trackingTier === 'tier_b') return TIER_B_POLL_MINUTES
+  if (trackingTier === 'tier_c') return TIER_C_POLL_MINUTES
+  return TIER_D_POLL_MINUTES
+}
+
+function getTierRank(trackingTier) {
+  if (trackingTier === 'tier_a') return 0
+  if (trackingTier === 'tier_b') return 1
+  if (trackingTier === 'tier_c') return 2
+  return 3
+}
+
+function computePriorityScore({
+  playing = 0,
+  trackingTier,
+  lastDiscoveredAt,
+  manuallyPinned = false,
+}) {
+  const nowMs = Date.now()
+  const recencyMinutes = minutesSince(lastDiscoveredAt, nowMs)
+  const recencyBoost = Math.max(720 - Math.min(recencyMinutes, 720), 0)
+  const tierBoost =
+    trackingTier === 'tier_a'
+      ? 2_000_000
+      : trackingTier === 'tier_b'
+        ? 1_000_000
+        : trackingTier === 'tier_c'
+          ? 250_000
+          : 0
+  const pinnedBoost = manuallyPinned ? 5_000_000 : 0
+
+  return pinnedBoost + tierBoost + Number(playing || 0) * 10 + recencyBoost
+}
+
+function extractSearchTokens(value) {
+  return String(value ?? '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter((token) =>
+      token.length >= 3 &&
+      !/^\d+$/.test(token) &&
+      !SEARCH_DISCOVERY_STOPWORDS.has(token),
+    )
+}
+
+function buildSearchDiscoveryTerms(discoveryGames) {
+  const tokenScores = new Map()
+  const hotGames = [...discoveryGames]
+    .filter((game) => Number(game.playing) >= TRACKING_WARM_CCU)
+    .sort((left, right) => Number(right.playing || 0) - Number(left.playing || 0))
+    .slice(0, 50)
+
+  for (const game of hotGames) {
+    const weight = Math.max(Number(game.playing || 0), 1)
+    for (const token of extractSearchTokens(game.name)) {
+      tokenScores.set(token, (tokenScores.get(token) ?? 0) + weight)
+    }
+  }
+
+  const dynamicTerms = [...tokenScores.entries()]
+    .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+    .map(([term]) => term)
+
+  const terms = [...new Set([
+    ...SEARCH_DISCOVERY_SEED_TERMS,
+    ...dynamicTerms,
+  ])]
+  const limit = Math.min(SEARCH_DISCOVERY_QUERY_LIMIT, terms.length)
+
+  if (limit === 0) {
+    return []
+  }
+
+  const selectedTerms = []
+  for (let index = 0; index < limit; index += 1) {
+    selectedTerms.push(terms[(searchDiscoveryCursor + index) % terms.length])
+  }
+  searchDiscoveryCursor = (searchDiscoveryCursor + limit) % terms.length
+
+  return selectedTerms
+}
+
+async function fetchSearchDiscoveryEntries(discoveryGames) {
+  const terms = buildSearchDiscoveryTerms(discoveryGames)
+
+  if (terms.length === 0) {
+    return []
+  }
+
+  const batches = await mapWithConcurrency(
+    terms,
+    4,
+    async (term) => {
+      try {
+        const sessionId = crypto.randomUUID()
+        const response = await fetchJson(
+          `https://apis.roblox.com/search-api/omni-search?searchQuery=${encodeURIComponent(term)}&verticalType=game&sessionId=${sessionId}`,
+        )
+
+        return (response.searchResults ?? [])
+          .flatMap((group) => (Array.isArray(group?.contents) ? group.contents : []))
+          .map((entry) => ({
+            universeId: Number(entry.universeId),
+            rootPlaceId: Number(entry.rootPlaceId) > 0 ? Number(entry.rootPlaceId) : undefined,
+            name: entry.name ?? `Universe ${entry.universeId}`,
+            creatorName: entry.creatorName ?? 'Unknown creator',
+            creatorId: Number(entry.creatorId) > 0 ? Number(entry.creatorId) : 0,
+            creatorType: entry.creatorType ?? 'User',
+            playerCount: Number(entry.playerCount ?? 0),
+            totalUpVotes: Number(entry.totalUpVotes ?? 0),
+            totalDownVotes: Number(entry.totalDownVotes ?? 0),
+            genre: entry.genre ?? 'Unclassified',
+            discoverySource: 'search_sweep',
+          }))
+          .filter((entry) =>
+            Number.isFinite(entry.universeId) &&
+            entry.universeId > 0 &&
+            entry.playerCount >= TRACKING_WARM_CCU)
+          .slice(0, SEARCH_DISCOVERY_RESULT_LIMIT)
+      } catch (error) {
+        console.warn(`[roterminal-worker] failed search discovery for "${term}"`, error)
+        return []
+      }
+    },
+  )
+
+  const entriesByUniverseId = new Map()
+  for (const entry of batches.flat()) {
+    const current = entriesByUniverseId.get(entry.universeId)
+    if (!current || entry.playerCount > current.playerCount) {
+      entriesByUniverseId.set(entry.universeId, entry)
+    }
+  }
+
+  return [...entriesByUniverseId.values()]
+}
+
+async function fetchUniverseGames(universeIds, options = {}) {
+  const { includeVotes = false } = options
+
   if (universeIds.length === 0) {
     return []
   }
@@ -154,30 +377,49 @@ async function fetchUniverseGames(universeIds) {
     const responses = await mapWithConcurrency(
       batches,
       UNIVERSE_FETCH_BATCH_CONCURRENCY,
-      (batch) => fetchUniverseGames(batch),
+      (batch) => fetchUniverseGames(batch, options),
     )
     return responses.flatMap((entry) => entry)
   }
 
   const idList = universeIds.join(',')
-  const [gamesResponse, votesResponse] = await Promise.all([
-    fetchJson(`https://games.roblox.com/v1/games?universeIds=${idList}`),
-    fetchJson(`https://games.roblox.com/v1/games/votes?universeIds=${idList}`),
-  ])
+  let gamesResponse
 
-  const votesById = new Map(
-    votesResponse.data.map((entry) => [
-      entry.id,
-      {
-        upVotes: entry.upVotes,
-        downVotes: entry.downVotes,
-        approval:
-          entry.upVotes + entry.downVotes === 0
-            ? 0
-            : (entry.upVotes / (entry.upVotes + entry.downVotes)) * 100,
-      },
-    ]),
-  )
+  try {
+    gamesResponse = await fetchJson(`https://games.roblox.com/v1/games?universeIds=${idList}`)
+  } catch (error) {
+    if (error?.statusCode === 429 && universeIds.length > 1) {
+      const midpoint = Math.ceil(universeIds.length / 2)
+      const firstHalf = universeIds.slice(0, midpoint)
+      const secondHalf = universeIds.slice(midpoint)
+
+      await sleep(RETRY_BASE_DELAY_MS * 2)
+
+      const firstResult = await fetchUniverseGames(firstHalf, options)
+      const secondResult = await fetchUniverseGames(secondHalf, options)
+      return [...firstResult, ...secondResult]
+    }
+
+    throw error
+  }
+  let votesById = new Map()
+
+  if (includeVotes) {
+    const votesResponse = await fetchJson(`https://games.roblox.com/v1/games/votes?universeIds=${idList}`)
+    votesById = new Map(
+      votesResponse.data.map((entry) => [
+        entry.id,
+        {
+          upVotes: entry.upVotes,
+          downVotes: entry.downVotes,
+          approval:
+            entry.upVotes + entry.downVotes === 0
+              ? 0
+              : (entry.upVotes / (entry.upVotes + entry.downVotes)) * 100,
+        },
+      ]),
+    )
+  }
 
   return gamesResponse.data.map((game) => ({
     universeId: game.id,
@@ -364,6 +606,176 @@ async function fetchPlatformDiscoveryEntries() {
   return [...discoveredByUniverseId.values()]
 }
 
+async function fetchCreatorPortfolioUniverseIds(discoveredGames) {
+  const candidateGames = [...discoveredGames]
+    .filter((game) => Number(game.playing) >= TRACKING_PRIORITY_CCU && Number(game.creatorId) > 0)
+    .sort((left, right) => Number(right.playing || 0) - Number(left.playing || 0))
+    .slice(0, DISCOVERY_CREATOR_EXPANSION_LIMIT)
+
+  const creatorKeys = [...new Set(
+    candidateGames.map((game) => `${game.creatorType ?? 'User'}:${game.creatorId}`),
+  )]
+
+  const batches = await mapWithConcurrency(
+    creatorKeys,
+    6,
+    async (creatorKey) => {
+      const [creatorType, rawCreatorId] = creatorKey.split(':')
+      const creatorId = Number(rawCreatorId)
+
+      if (!Number.isFinite(creatorId) || creatorId <= 0) {
+        return []
+      }
+
+      const endpoint =
+        creatorType === 'Group'
+          ? `https://games.roblox.com/v2/groups/${creatorId}/games?accessFilter=Public&limit=${DISCOVERY_CREATOR_GAME_LIMIT}&sortOrder=Desc`
+          : `https://games.roblox.com/v2/users/${creatorId}/games?accessFilter=Public&limit=${DISCOVERY_CREATOR_GAME_LIMIT}&sortOrder=Desc`
+
+      try {
+        const response = await fetchJson(endpoint)
+        return (response.data ?? []).map((entry) => ({
+          universeId: Number(entry.id),
+          rootPlaceId: Number(entry.rootPlace?.id) > 0 ? Number(entry.rootPlace.id) : undefined,
+          name: entry.name ?? `Universe ${entry.id}`,
+          creatorId,
+          creatorType,
+          discoverySource: 'creator_portfolio',
+        }))
+      } catch (error) {
+        console.warn(
+          `[roterminal-worker] failed to expand creator portfolio ${creatorKey}`,
+          error,
+        )
+        return []
+      }
+    },
+  )
+
+  return batches.flat()
+}
+
+async function fetchUniverseGamesWithFallback(universeIds, discoveryEntries = []) {
+  try {
+    return await fetchUniverseGames(universeIds)
+  } catch (error) {
+    if (error?.statusCode !== 429) {
+      throw error
+    }
+
+    console.warn(
+      `[roterminal-worker] falling back to cached snapshot data for ${universeIds.length} universes after Roblox rate limit`,
+    )
+
+    return mergeDiscoveredFallbackGames(
+      database.getLatestSnapshotGames(universeIds),
+      discoveryEntries,
+    )
+  }
+}
+
+function buildTrackedUniverseRecords({
+  existingRecords,
+  discoveryEntries,
+  snapshotGames,
+  maxCount,
+}) {
+  const nowIso = isoNow()
+  const existingByUniverseId = new Map(existingRecords.map((record) => [record.universeId, record]))
+  const snapshotGamesByUniverseId = new Map(snapshotGames.map((game) => [game.universeId, game]))
+  const discoveryByUniverseId = new Map(
+    discoveryEntries.map((entry) => [entry.universeId, entry]),
+  )
+  const allUniverseIds = dedupeUniverseIds(
+    existingRecords.map((record) => record.universeId),
+    discoveryEntries.map((entry) => entry.universeId),
+    snapshotGames.map((game) => game.universeId),
+    DEFAULT_TRACKED_IDS,
+  )
+
+  const nextRecords = allUniverseIds.map((universeId) => {
+    const existing = existingByUniverseId.get(universeId)
+    const game = snapshotGamesByUniverseId.get(universeId)
+    const discovery = discoveryByUniverseId.get(universeId)
+    const playing = Number(game?.playing ?? discovery?.playerCount ?? existing?.lastKnownPlaying ?? 0)
+    const trackingTier = getTrackingTier(playing)
+    const previousTierRank = existing ? getTierRank(existing.trackingTier) : Number.POSITIVE_INFINITY
+    const nextTierRank = getTierRank(trackingTier)
+    const lastDiscoveredAt = discovery ? nowIso : (existing?.lastDiscoveredAt ?? nowIso)
+    const record = {
+      universeId,
+      sortOrder: 0,
+      trackingTier,
+      pollIntervalMinutes: getPollIntervalMinutesForTier(trackingTier),
+      priorityScore: 0,
+      lastKnownPlaying: playing,
+      discoverySource:
+        discovery?.discoverySource ??
+        (discovery && !existing?.discoverySource ? 'platform_discovery' : existing?.discoverySource) ??
+        'manual',
+      firstDiscoveredAt: existing?.firstDiscoveredAt ?? nowIso,
+      lastDiscoveredAt,
+      lastPromotedAt:
+        nextTierRank < previousTierRank || (playing >= TRACKING_PRIORITY_CCU && !existing)
+          ? nowIso
+          : (existing?.lastPromotedAt ?? null),
+      lastPolledAt: snapshotGamesByUniverseId.has(universeId)
+        ? nowIso
+        : (existing?.lastPolledAt ?? null),
+      manuallyPinned: existing?.manuallyPinned ?? false,
+    }
+
+    record.priorityScore = computePriorityScore(record)
+    return record
+  })
+
+  const rankedRecords = nextRecords
+    .sort((left, right) =>
+      Number(right.manuallyPinned) - Number(left.manuallyPinned) ||
+      getTierRank(left.trackingTier) - getTierRank(right.trackingTier) ||
+      right.priorityScore - left.priorityScore ||
+      right.lastKnownPlaying - left.lastKnownPlaying ||
+      Date.parse(right.lastDiscoveredAt) - Date.parse(left.lastDiscoveredAt) ||
+      left.universeId - right.universeId)
+    .slice(0, maxCount)
+    .map((record, index) => ({
+      ...record,
+      sortOrder: index,
+    }))
+
+  return rankedRecords
+}
+
+function selectDueTrackedUniverseIds(records) {
+  const nowMs = Date.now()
+  const dueRecords = records
+    .filter((record) => minutesSince(record.lastPolledAt, nowMs) >= record.pollIntervalMinutes)
+    .sort((left, right) =>
+      getTierRank(left.trackingTier) - getTierRank(right.trackingTier) ||
+      (left.lastPolledAt ? Date.parse(left.lastPolledAt) : 0) -
+        (right.lastPolledAt ? Date.parse(right.lastPolledAt) : 0) ||
+      right.priorityScore - left.priorityScore)
+
+  const budgets = {
+    tier_a: TIER_A_POLL_BUDGET,
+    tier_b: TIER_B_POLL_BUDGET,
+    tier_c: TIER_C_POLL_BUDGET,
+    tier_d: TIER_D_POLL_BUDGET,
+  }
+  const selectedIds = []
+
+  for (const record of dueRecords) {
+    const tierKey = record.trackingTier in budgets ? record.trackingTier : 'tier_d'
+    if (budgets[tierKey] <= 0) {
+      continue
+    }
+    budgets[tierKey] -= 1
+    selectedIds.push(record.universeId)
+  }
+
+  return selectedIds
+}
+
 function mergeDiscoveredFallbackGames(fetchedGames, discoveryEntries) {
   const gamesByUniverseId = new Map(fetchedGames.map((game) => [game.universeId, game]))
   const fallbackTimestamp = new Date().toISOString()
@@ -411,39 +823,92 @@ async function pollTrackedUniverses(trigger = 'worker') {
   const ingestRunId = await database.startIngestRun(trigger)
 
   try {
-    const trackedUniverseIds = await database.getTrackedUniverseIds()
-    const trackedIds = trackedUniverseIds.length > 0 ? trackedUniverseIds : DEFAULT_TRACKED_IDS
-    const discoveredEntries = await fetchPlatformDiscoveryEntries()
-    const discoveredUniverseIds = discoveredEntries.map((entry) => entry.universeId)
-    await database.appendTrackedUniverseIds(discoveredUniverseIds, TRACKED_UNIVERSE_CAP)
-    const snapshotUniverseIds = dedupeUniverseIds(trackedIds, discoveredUniverseIds)
-    const snapshotGames = mergeDiscoveredFallbackGames(
-      await fetchUniverseGames(snapshotUniverseIds),
-      discoveredEntries,
+    const trackedRecords = await database.getTrackedUniverseRecords()
+    const trackedIds =
+      trackedRecords.length > 0
+        ? trackedRecords.map((record) => record.universeId)
+        : DEFAULT_TRACKED_IDS
+    const discoveryEntries = await fetchPlatformDiscoveryEntries().catch((error) => {
+      console.warn('[roterminal-worker] failed to fetch platform discovery entries', error)
+      return []
+    })
+    const prioritizedDiscoveryEntries = [...discoveryEntries]
+      .sort((left, right) => Number(right.playerCount || 0) - Number(left.playerCount || 0))
+      .slice(0, DISCOVERY_LIVE_POLL_LIMIT)
+    const discoveredUniverseIds = prioritizedDiscoveryEntries.map((entry) => entry.universeId)
+    const discoveryGames = mergeDiscoveredFallbackGames(
+      await fetchUniverseGamesWithFallback(discoveredUniverseIds, prioritizedDiscoveryEntries),
+      prioritizedDiscoveryEntries,
     )
+    const searchDiscoveryEntries = await fetchSearchDiscoveryEntries(discoveryGames)
+    const searchDiscoveryGames = mergeDiscoveredFallbackGames(discoveryGames, searchDiscoveryEntries)
+    const creatorExpansionEntries = await fetchCreatorPortfolioUniverseIds(searchDiscoveryGames)
+    const allDiscoveryEntries = [
+      ...discoveryEntries.map((entry) => ({
+        ...entry,
+        discoverySource: 'platform_discovery',
+      })),
+      ...searchDiscoveryEntries,
+      ...creatorExpansionEntries,
+    ]
+    const dueTrackedUniverseIds = selectDueTrackedUniverseIds(trackedRecords)
+    const snapshotUniverseIds = dedupeUniverseIds(
+      trackedIds.length > 0 ? dueTrackedUniverseIds : trackedIds,
+      discoveredUniverseIds,
+      searchDiscoveryEntries.map((entry) => entry.universeId),
+      creatorExpansionEntries.map((entry) => entry.universeId),
+      DEFAULT_TRACKED_IDS,
+    )
+    const snapshotGames = mergeDiscoveredFallbackGames(
+      await fetchUniverseGamesWithFallback(snapshotUniverseIds, allDiscoveryEntries),
+      allDiscoveryEntries,
+    )
+    const nextTrackedRecords = buildTrackedUniverseRecords({
+      existingRecords: trackedRecords.length > 0
+        ? trackedRecords
+        : trackedIds.map((universeId, index) => ({
+            universeId,
+            sortOrder: index,
+            trackingTier: 'tier_d',
+            pollIntervalMinutes: TIER_D_POLL_MINUTES,
+            priorityScore: 0,
+            lastKnownPlaying: 0,
+            discoverySource: 'seed',
+            firstDiscoveredAt: isoNow(),
+            lastDiscoveredAt: isoNow(),
+            lastPromotedAt: null,
+            lastPolledAt: null,
+            manuallyPinned: false,
+          })),
+      discoveryEntries: [
+        ...discoveryEntries.map((entry) => ({
+          ...entry,
+          discoverySource: 'platform_discovery',
+        })),
+        ...searchDiscoveryEntries,
+        ...creatorExpansionEntries,
+      ],
+      snapshotGames,
+      maxCount: TRACKED_UNIVERSE_CAP,
+    })
+    await database.replaceTrackedUniverseRecords(nextTrackedRecords)
     const observedAt = new Date().toISOString()
-    const platformPoint = {
-      timestamp: observedAt,
-      value: snapshotGames.reduce((sum, game) => sum + (Number(game.playing) || 0), 0),
-      source: 'worker_live',
-    }
 
     await database.recordSnapshots(snapshotGames, {
       observedAt,
       source: 'worker_live',
     })
-    await database.recordPlatformCurrentMetric(platformPoint)
-    await database.recordPlatformHistoryPoints([platformPoint], 'worker_live')
 
     await database.finishIngestRun(ingestRunId, {
       status: 'success',
       source: 'worker_live',
-      trackedUniverseCount: trackedIds.length,
-      discoveredUniverseCount: discoveredUniverseIds.length,
+      trackedUniverseCount: nextTrackedRecords.length,
+      discoveredUniverseCount:
+        discoveryEntries.length + searchDiscoveryEntries.length + creatorExpansionEntries.length,
     })
 
     console.log(
-      `[roterminal-worker] ingested ${snapshotGames.length} total universes (${trackedIds.length} tracked, ${discoveredUniverseIds.length} discovered)`,
+      `[roterminal-worker] ingested ${snapshotGames.length} universes (${discoveryEntries.length} discoveries seen, ${discoveredUniverseIds.length} discovery polls, ${searchDiscoveryEntries.length} search discoveries, ${creatorExpansionEntries.length} creator expansions, ${dueTrackedUniverseIds.length} due tracked polls, ${nextTrackedRecords.length} tracked total)`,
     )
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : 'Unknown ingestion failure'
