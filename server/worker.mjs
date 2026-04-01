@@ -667,11 +667,54 @@ async function fetchCreatorPortfolioUniverseIds(discoveredGames) {
 }
 
 async function fetchUniverseGamesWithFallback(universeIds, discoveryEntries = []) {
+  if (universeIds.length === 0) {
+    return {
+      games: [],
+      liveGames: [],
+      source: 'live',
+    }
+  }
+
   try {
-    return await fetchUniverseGames(universeIds)
+    const games = await fetchUniverseGames(universeIds)
+    return {
+      games,
+      liveGames: games,
+      source: 'live',
+    }
   } catch (error) {
     if (error?.statusCode !== 429) {
       throw error
+    }
+
+    if (universeIds.length > 1) {
+      const midpoint = Math.ceil(universeIds.length / 2)
+      const firstUniverseIds = universeIds.slice(0, midpoint)
+      const secondUniverseIds = universeIds.slice(midpoint)
+      const firstUniverseIdSet = new Set(firstUniverseIds)
+      const secondUniverseIdSet = new Set(secondUniverseIds)
+
+      const [firstResult, secondResult] = await Promise.all([
+        fetchUniverseGamesWithFallback(
+          firstUniverseIds,
+          discoveryEntries.filter((entry) => firstUniverseIdSet.has(entry.universeId)),
+        ),
+        fetchUniverseGamesWithFallback(
+          secondUniverseIds,
+          discoveryEntries.filter((entry) => secondUniverseIdSet.has(entry.universeId)),
+        ),
+      ])
+
+      return {
+        games: [...firstResult.games, ...secondResult.games],
+        liveGames: [...firstResult.liveGames, ...secondResult.liveGames],
+        source:
+          firstResult.source === 'live' && secondResult.source === 'live'
+            ? 'live'
+            : firstResult.liveGames.length > 0 || secondResult.liveGames.length > 0
+              ? 'mixed'
+              : 'database_fallback',
+      }
     }
 
     console.warn(
@@ -680,10 +723,11 @@ async function fetchUniverseGamesWithFallback(universeIds, discoveryEntries = []
 
     const snapshotGames = await database.getLatestSnapshotGames(universeIds)
 
-    return mergeDiscoveredFallbackGames(
-      snapshotGames,
-      discoveryEntries,
-    )
+    return {
+      games: mergeDiscoveredFallbackGames(snapshotGames, discoveryEntries),
+      liveGames: [],
+      source: 'database_fallback',
+    }
   }
 }
 
@@ -691,11 +735,13 @@ function buildTrackedUniverseRecords({
   existingRecords,
   discoveryEntries,
   snapshotGames,
+  liveSnapshotUniverseIds = [],
   maxCount,
 }) {
   const nowIso = isoNow()
   const existingByUniverseId = new Map(existingRecords.map((record) => [record.universeId, record]))
   const snapshotGamesByUniverseId = new Map(snapshotGames.map((game) => [game.universeId, game]))
+  const liveSnapshotUniverseIdSet = new Set(liveSnapshotUniverseIds)
   const discoveryByUniverseId = new Map(
     discoveryEntries.map((entry) => [entry.universeId, entry]),
   )
@@ -732,7 +778,7 @@ function buildTrackedUniverseRecords({
         nextTierRank < previousTierRank || (playing >= TRACKING_PRIORITY_CCU && !existing)
           ? nowIso
           : (existing?.lastPromotedAt ?? null),
-      lastPolledAt: snapshotGamesByUniverseId.has(universeId)
+      lastPolledAt: liveSnapshotUniverseIdSet.has(universeId)
         ? nowIso
         : (existing?.lastPolledAt ?? null),
       manuallyPinned: existing?.manuallyPinned ?? false,
@@ -849,8 +895,12 @@ async function pollTrackedUniverses(trigger = 'worker') {
       .sort((left, right) => Number(right.playerCount || 0) - Number(left.playerCount || 0))
       .slice(0, DISCOVERY_LIVE_POLL_LIMIT)
     const discoveredUniverseIds = prioritizedDiscoveryEntries.map((entry) => entry.universeId)
+    const discoveryFetch = await fetchUniverseGamesWithFallback(
+      discoveredUniverseIds,
+      prioritizedDiscoveryEntries,
+    )
     const discoveryGames = mergeDiscoveredFallbackGames(
-      await fetchUniverseGamesWithFallback(discoveredUniverseIds, prioritizedDiscoveryEntries),
+      discoveryFetch.games,
       prioritizedDiscoveryEntries,
     )
     const searchDiscoveryEntries = await fetchSearchDiscoveryEntries(discoveryGames)
@@ -872,8 +922,12 @@ async function pollTrackedUniverses(trigger = 'worker') {
       creatorExpansionEntries.map((entry) => entry.universeId),
       DEFAULT_TRACKED_IDS,
     )
+    const snapshotFetch = await fetchUniverseGamesWithFallback(
+      snapshotUniverseIds,
+      allDiscoveryEntries,
+    )
     const snapshotGames = mergeDiscoveredFallbackGames(
-      await fetchUniverseGamesWithFallback(snapshotUniverseIds, allDiscoveryEntries),
+      snapshotFetch.games,
       allDiscoveryEntries,
     )
     const nextTrackedRecords = buildTrackedUniverseRecords({
@@ -902,15 +956,18 @@ async function pollTrackedUniverses(trigger = 'worker') {
         ...creatorExpansionEntries,
       ],
       snapshotGames,
+      liveSnapshotUniverseIds: snapshotFetch.liveGames.map((game) => game.universeId),
       maxCount: TRACKED_UNIVERSE_CAP,
     })
     await database.replaceTrackedUniverseRecords(nextTrackedRecords)
     const observedAt = new Date().toISOString()
 
-    await database.recordSnapshots(snapshotGames, {
-      observedAt,
-      source: 'worker_live',
-    })
+    if (snapshotFetch.liveGames.length > 0) {
+      await database.recordSnapshots(snapshotFetch.liveGames, {
+        observedAt,
+        source: 'worker_live',
+      })
+    }
 
     const limitedTrackedGames = [...snapshotGames]
       .sort((left, right) => (Number(right.playing) || 0) - (Number(left.playing) || 0))
@@ -947,14 +1004,19 @@ async function pollTrackedUniverses(trigger = 'worker') {
 
     await database.finishIngestRun(ingestRunId, {
       status: 'success',
-      source: 'worker_live',
+      source:
+        snapshotFetch.source === 'live'
+          ? 'worker_live'
+          : snapshotFetch.source === 'mixed'
+            ? 'worker_mixed'
+            : 'worker_fallback',
       trackedUniverseCount: nextTrackedRecords.length,
       discoveredUniverseCount:
         discoveryEntries.length + searchDiscoveryEntries.length + creatorExpansionEntries.length,
     })
 
     console.log(
-      `[roterminal-worker] ingested ${snapshotGames.length} universes (${discoveryEntries.length} discoveries seen, ${discoveredUniverseIds.length} discovery polls, ${searchDiscoveryEntries.length} search discoveries, ${creatorExpansionEntries.length} creator expansions, ${dueTrackedUniverseIds.length} due tracked polls, ${nextTrackedRecords.length} tracked total)`,
+      `[roterminal-worker] ingested ${snapshotFetch.liveGames.length}/${snapshotGames.length} live universes (${discoveryEntries.length} discoveries seen, ${discoveredUniverseIds.length} discovery polls, ${searchDiscoveryEntries.length} search discoveries, ${creatorExpansionEntries.length} creator expansions, ${dueTrackedUniverseIds.length} due tracked polls, ${nextTrackedRecords.length} tracked total, snapshot source ${snapshotFetch.source})`,
     )
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : 'Unknown ingestion failure'
