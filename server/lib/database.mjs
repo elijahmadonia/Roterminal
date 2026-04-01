@@ -8,6 +8,8 @@ import {
   SNAPSHOT_RETENTION_MS,
 } from '../config.mjs'
 
+const PLATFORM_METRIC_KEY = 'platform_ccu'
+
 function hasTableColumn(db, tableName, columnName) {
   return db
     .prepare(`PRAGMA table_info(${tableName})`)
@@ -553,6 +555,23 @@ const MIGRATIONS = [
       `)
     },
   },
+  {
+    id: '010_platform_history_points',
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS platform_history_points (
+          metric_key TEXT NOT NULL,
+          observed_at TEXT NOT NULL,
+          playing INTEGER NOT NULL,
+          source TEXT NOT NULL,
+          PRIMARY KEY (metric_key, observed_at)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_platform_history_points_metric_observed
+          ON platform_history_points(metric_key, observed_at ASC);
+      `)
+    },
+  },
 ]
 
 function applyMigrations(db) {
@@ -879,6 +898,46 @@ export async function createDatabase() {
       source = excluded.source,
       updated_at = CURRENT_TIMESTAMP
     WHERE excluded.observed_at >= platform_current_metrics.observed_at
+  `)
+
+  const upsertPlatformHistoryPointStmt = db.prepare(`
+    INSERT INTO platform_history_points (
+      metric_key,
+      observed_at,
+      playing,
+      source
+    )
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(metric_key, observed_at) DO UPDATE SET
+      playing = excluded.playing,
+      source = excluded.source
+  `)
+
+  const getPlatformHistoryPointsStmt = db.prepare(`
+    SELECT
+      observed_at,
+      playing,
+      source
+    FROM platform_history_points
+    WHERE metric_key = ?
+      AND observed_at >= ?
+    ORDER BY observed_at ASC
+  `)
+
+  const getAllPlatformHistoryPointsStmt = db.prepare(`
+    SELECT
+      observed_at,
+      playing,
+      source
+    FROM platform_history_points
+    WHERE metric_key = ?
+    ORDER BY observed_at ASC
+  `)
+
+  const prunePlatformHistoryPointsStmt = db.prepare(`
+    DELETE FROM platform_history_points
+    WHERE metric_key = ?
+      AND observed_at < ?
   `)
 
   const getAppStateStmt = db.prepare(`
@@ -1863,7 +1922,7 @@ export async function createDatabase() {
   }
 
   function getPlatformCurrentMetric() {
-    const row = getPlatformCurrentMetricStmt.get('global')
+    const row = getPlatformCurrentMetricStmt.get(PLATFORM_METRIC_KEY)
 
     if (!row) {
       return null
@@ -1882,11 +1941,71 @@ export async function createDatabase() {
     }
 
     upsertPlatformCurrentMetricStmt.run(
-      'global',
+      PLATFORM_METRIC_KEY,
       point.timestamp,
       Math.round(point.value),
       point.source ?? 'live',
     )
+  }
+
+  function recordPlatformHistoryPoints(points, source = 'live') {
+    if (!Array.isArray(points) || points.length === 0) {
+      return 0
+    }
+
+    let importedCount = 0
+    let latestPoint = null
+
+    for (const point of points) {
+      const timestamp = String(point?.timestamp ?? point?.observedAt ?? point?.observed_at ?? '')
+      const value = Number(point?.value ?? point?.playing)
+
+      if (!timestamp || !Number.isFinite(value)) {
+        continue
+      }
+
+      const normalizedPoint = {
+        timestamp,
+        value: Math.round(value),
+        source: String(point?.source ?? source),
+      }
+
+      upsertPlatformHistoryPointStmt.run(
+        PLATFORM_METRIC_KEY,
+        normalizedPoint.timestamp,
+        normalizedPoint.value,
+        normalizedPoint.source,
+      )
+      importedCount += 1
+
+      if (!latestPoint || Date.parse(timestamp) >= Date.parse(latestPoint.timestamp)) {
+        latestPoint = normalizedPoint
+      }
+    }
+
+    if (latestPoint) {
+      recordPlatformCurrentMetric(latestPoint)
+    }
+
+    prunePlatformHistoryPointsStmt.run(
+      PLATFORM_METRIC_KEY,
+      new Date(Date.now() - SNAPSHOT_RETENTION_MS).toISOString(),
+    )
+
+    return importedCount
+  }
+
+  function getPlatformHistoryPoints(cutoffIso) {
+    const rows =
+      typeof cutoffIso === 'string' && cutoffIso.length > 0
+        ? getPlatformHistoryPointsStmt.all(PLATFORM_METRIC_KEY, cutoffIso)
+        : getAllPlatformHistoryPointsStmt.all(PLATFORM_METRIC_KEY)
+
+    return rows.map((row) => ({
+      timestamp: row.observed_at,
+      value: Number(row.playing) || 0,
+      source: row.source ?? 'live',
+    }))
   }
 
   function getBoardSnapshot(range = '24h') {
@@ -2432,6 +2551,7 @@ export async function createDatabase() {
     getLatestIngestRun,
     getLatestSnapshotGames,
     getPlatformCurrentMetric,
+    getPlatformHistoryPoints,
     getTrackedUniverseRecords,
     getUniverseRootPlaceMap,
     getTrackedUniverseIds,
@@ -2439,6 +2559,7 @@ export async function createDatabase() {
     recordBoardSnapshot,
     recordGamePageSnapshot,
     recordPlatformCurrentMetric,
+    recordPlatformHistoryPoints,
     recordExternalHistory,
     recordSnapshots,
     recoverStaleIngestRuns,

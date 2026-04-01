@@ -295,6 +295,11 @@ let lastIngestError = null
 let lastHomeFetchAttemptedAt = null
 let lastHomeFetchSucceededAt = null
 let lastHomeFetchError = null
+let lastPlatformStatsFetchAttemptedAt = null
+let lastPlatformStatsFetchSucceededAt = null
+let lastPlatformStatsFetchError = null
+let lastPlatformStatsFetchRange = null
+let lastPlatformStatsResolvedSource = null
 let lastHomeFetchSortCount = 0
 let lastHomeFetchUniverseCount = 0
 let lastHomeFetchSeedSuccessCount = 0
@@ -329,12 +334,14 @@ const {
   getLatestIngestRun,
   getLatestSnapshotGames,
   getPlatformCurrentMetric,
+  getPlatformHistoryPoints,
   getTrackedDiscoverySourceCounts,
   getTrackedTierCounts,
   getTrackedUniverseIds,
   recordBoardSnapshot,
   recordGamePageSnapshot,
   recordPlatformCurrentMetric,
+  recordPlatformHistoryPoints,
   recordSnapshots,
   recoverStaleIngestRuns,
   replaceTrackedUniverseIds,
@@ -2563,71 +2570,119 @@ function buildPlatformStatsFallbackPayload(
   }
 }
 
+function buildPlatformStatsStoragePoints(payload, source = 'live') {
+  const points = [
+    ...(payload?.timeline ?? []).map((point) => ({
+      timestamp: point.timestamp,
+      value: point.value,
+      source,
+    })),
+    payload?.latest?.timestamp && Number.isFinite(Number(payload?.latest?.value))
+      ? {
+          timestamp: payload.latest.timestamp,
+          value: Number(payload.latest.value),
+          source,
+        }
+      : null,
+  ].filter(Boolean)
+
+  const pointsByTimestamp = new Map()
+
+  for (const point of points) {
+    if (!point?.timestamp) {
+      continue
+    }
+
+    pointsByTimestamp.set(point.timestamp, point)
+  }
+
+  return [...pointsByTimestamp.values()].sort(
+    (left, right) => Date.parse(left.timestamp) - Date.parse(right.timestamp),
+  )
+}
+
+function buildStoredPlatformStatsPayload(
+  historyPoints,
+  currentPoint,
+  range = '24h',
+  source = 'stored_history',
+) {
+  const combinedPoints = [
+    ...(Array.isArray(historyPoints) ? historyPoints : []),
+    currentPoint?.timestamp && Number.isFinite(Number(currentPoint?.value))
+      ? {
+          timestamp: currentPoint.timestamp,
+          value: Number(currentPoint.value),
+          source: currentPoint.source ?? source,
+        }
+      : null,
+  ].filter(Boolean)
+
+  const pointsByTimestamp = new Map()
+
+  for (const point of combinedPoints) {
+    const timestamp = String(point?.timestamp ?? '')
+    const value = Number(point?.value)
+
+    if (!timestamp || !Number.isFinite(value)) {
+      continue
+    }
+
+    pointsByTimestamp.set(timestamp, {
+      timestamp,
+      value,
+      source: String(point?.source ?? source),
+    })
+  }
+
+  const timeline = limitTrendPoints(
+    [...pointsByTimestamp.values()]
+      .sort((left, right) => Date.parse(left.timestamp) - Date.parse(right.timestamp))
+      .map((point) => ({
+        label: formatTrendLabel(point.timestamp),
+        timestamp: point.timestamp,
+        value: point.value,
+      })),
+    getMaxTrendPoints(range),
+  )
+  const latestPoint = timeline.at(-1) ?? null
+  const latestTimestamp = latestPoint?.timestamp ?? currentPoint?.timestamp ?? new Date().toISOString()
+  const latestValue =
+    latestPoint?.value ??
+    (Number.isFinite(Number(currentPoint?.value)) ? Number(currentPoint.value) : 0)
+  const tone = buildPlatformTone(latestValue, timeline)
+
+  return {
+    status: {
+      label: 'Full platform CCU using stored history',
+      detail: `${formatWholeNumber(latestValue)} players across Roblox right now.`,
+      tone,
+    },
+    source,
+    latest: {
+      value: latestValue,
+      timestamp: latestTimestamp,
+      source,
+    },
+    peak: null,
+    timeline,
+    tone,
+    range,
+  }
+}
+
 async function fetchFullPlatformStats(range = '24h') {
   const cachedStats = readCache(platformStatsCache, range)
 
   if (cachedStats) {
-    return {
-      ...cachedStats,
-      source: 'live',
-    }
+    lastPlatformStatsFetchRange = range
+    lastPlatformStatsResolvedSource = cachedStats.source ?? cachedStats.latest?.source ?? 'cache_hit'
+    return cachedStats
   }
 
   const staleStats = readCacheEntry(platformStatsCache, range)
-  if (staleStats?.value) {
-    return {
-      ...staleStats.value,
-      source: 'cache',
-      status: {
-        ...staleStats.value.status,
-        label: 'Full platform CCU using cache',
-      },
-      latest: {
-        ...staleStats.value.latest,
-        source: 'cache',
-      },
-    }
-  }
-
-  const buildFastPlatformFallback = async () => {
-    const storedBoard =
-      (await getBoardSnapshot('24h').catch(() => null)) ??
-      (await fetchPlatformBoardPayload('24h').catch(() => null))
-
-    if (storedBoard?.leaderboard?.length) {
-      const latestValue = storedBoard.leaderboard.reduce(
-        (sum, game) => sum + (Number(game.playing) || 0),
-        0,
-      )
-      const fallback = buildPlatformStatsFallbackPayload(
-        latestValue,
-        new Date().toISOString(),
-        range,
-        'board_fallback',
-      )
-      writeCache(platformStatsCache, range, fallback, getPlatformStatsCacheTtlMs(range))
-      return fallback
-    }
-
-    const storedPoint = await getPlatformCurrentMetric()
-    if (storedPoint?.timestamp && Number.isFinite(Number(storedPoint?.value))) {
-      const fallback = buildPlatformStatsFallbackPayload(
-        Number(storedPoint.value),
-        storedPoint.timestamp,
-        range,
-        'stored_fallback',
-      )
-      writeCache(platformStatsCache, range, fallback, getPlatformStatsCacheTtlMs(range))
-      return fallback
-    }
-
-    return buildPlatformStatsFallbackPayload(0, new Date().toISOString(), range, 'empty_fallback')
-  }
-
-  if (!SERVER_ENABLE_SCHEDULED_INGEST) {
-    return buildFastPlatformFallback()
-  }
-
+  lastPlatformStatsFetchAttemptedAt = new Date().toISOString()
+  lastPlatformStatsFetchRange = range
   const { startDatetime, endDatetime } = buildPlatformStatsWindow(range)
 
   try {
@@ -2647,11 +2702,97 @@ async function fetchFullPlatformStats(range = '24h') {
     )
 
     const normalized = normalizePlatformStatsPayload(response?.data ?? response, 'live', range)
+    const storagePoints = buildPlatformStatsStoragePoints(normalized, 'live')
+    await recordPlatformHistoryPoints(storagePoints, 'live')
     await recordPlatformCurrentMetric(normalized.latest)
     writeCache(platformStatsCache, range, normalized, getPlatformStatsCacheTtlMs(range))
+    lastPlatformStatsFetchSucceededAt = new Date().toISOString()
+    lastPlatformStatsFetchError = null
+    lastPlatformStatsResolvedSource = normalized.source
     return normalized
   } catch (error) {
-    return buildFastPlatformFallback()
+    const errorMessage = error instanceof Error ? error.message : String(error)
+    lastPlatformStatsFetchError = errorMessage
+    console.error(`[platform-stats] live fetch failed for ${range}`, error)
+
+    if (staleStats?.value) {
+      const stalePayload =
+        staleStats.value.source === 'live'
+          ? {
+              ...staleStats.value,
+              source: 'cache',
+              status: {
+                ...staleStats.value.status,
+                label: 'Full platform CCU using cache',
+              },
+              latest: {
+                ...staleStats.value.latest,
+                source: 'cache',
+              },
+            }
+          : staleStats.value
+
+      lastPlatformStatsResolvedSource = stalePayload.source ?? 'cache'
+      return stalePayload
+    }
+
+    const [storedPoint, storedHistory] = await Promise.all([
+      getPlatformCurrentMetric(),
+      getPlatformHistoryPoints(startDatetime),
+    ])
+
+    if ((storedHistory?.length ?? 0) > 0 || storedPoint?.timestamp) {
+      const storedPayload = buildStoredPlatformStatsPayload(
+        storedHistory,
+        storedPoint,
+        range,
+        'stored_history',
+      )
+      writeCache(platformStatsCache, range, storedPayload, getPlatformStatsCacheTtlMs(range))
+      lastPlatformStatsResolvedSource = storedPayload.source
+      return storedPayload
+    }
+
+    const storedBoard =
+      (await getBoardSnapshot('24h').catch(() => null)) ??
+      (await fetchPlatformBoardPayload('24h').catch(() => null))
+
+    if (storedBoard?.leaderboard?.length) {
+      const latestValue = storedBoard.leaderboard.reduce(
+        (sum, game) => sum + (Number(game.playing) || 0),
+        0,
+      )
+      const fallback = buildPlatformStatsFallbackPayload(
+        latestValue,
+        new Date().toISOString(),
+        range,
+        'board_fallback',
+      )
+      writeCache(platformStatsCache, range, fallback, getPlatformStatsCacheTtlMs(range))
+      lastPlatformStatsResolvedSource = fallback.source
+      return fallback
+    }
+
+    if (storedPoint?.timestamp && Number.isFinite(Number(storedPoint?.value))) {
+      const fallback = buildPlatformStatsFallbackPayload(
+        Number(storedPoint.value),
+        storedPoint.timestamp,
+        range,
+        'stored_fallback',
+      )
+      writeCache(platformStatsCache, range, fallback, getPlatformStatsCacheTtlMs(range))
+      lastPlatformStatsResolvedSource = fallback.source
+      return fallback
+    }
+
+    const emptyFallback = buildPlatformStatsFallbackPayload(
+      0,
+      new Date().toISOString(),
+      range,
+      'empty_fallback',
+    )
+    lastPlatformStatsResolvedSource = emptyFallback.source
+    return emptyFallback
   }
 }
 
@@ -2662,7 +2803,12 @@ async function fetchFullPlatformPointPayload() {
     for (const range of cachedRanges) {
       const cachedStats = readCache(platformStatsCache, range)
 
-      if (cachedStats?.latest) {
+      if (
+        cachedStats?.latest &&
+        !['board_fallback', 'stored_fallback', 'empty_fallback'].includes(
+          String(cachedStats.source ?? cachedStats.latest.source ?? ''),
+        )
+      ) {
         return cachedStats.latest
       }
     }
@@ -2671,6 +2817,14 @@ async function fetchFullPlatformPointPayload() {
 
     if (storedPoint) {
       return storedPoint
+    }
+
+    for (const range of cachedRanges) {
+      const cachedStats = readCache(platformStatsCache, range)
+
+      if (cachedStats?.latest) {
+        return cachedStats.latest
+      }
     }
 
     const payload = await fetchFullPlatformStats('24h')
@@ -4367,6 +4521,7 @@ async function runScheduledIngest() {
 }
 
 async function getOpsMetrics() {
+  const platform24hWindow = buildPlatformStatsWindow('24h')
   const [
     latestIngestRun,
     activeLease,
@@ -4381,6 +4536,8 @@ async function getOpsMetrics() {
     externalHistoryCount,
     externalImportRunCount,
     legacySnapshotCount,
+    platformCurrentMetric,
+    platformHistory24h,
   ] = await Promise.all([
     getLatestIngestRun(),
     getActiveIngestLease('scheduler'),
@@ -4395,6 +4552,8 @@ async function getOpsMetrics() {
     countExternalHistory(),
     countExternalImportRuns(),
     countSnapshots(),
+    getPlatformCurrentMetric(),
+    getPlatformHistoryPoints(platform24hWindow.startDatetime),
   ])
   const lastIngestedAtMs =
     typeof lastIngestedAt === 'string' ? Date.parse(lastIngestedAt) : Number.NaN
@@ -4411,6 +4570,12 @@ async function getOpsMetrics() {
   const healthy = ingestDisabled
     ? true
     : lastIngestError == null && !missingIngest && !staleIngest && !activeLeaseExpired
+  const platformLatestHistoryPoint =
+    platformHistory24h.length > 0 ? platformHistory24h[platformHistory24h.length - 1] : null
+  const platformResolvedSource = lastPlatformStatsResolvedSource ?? platformCurrentMetric?.source ?? null
+  const platformDegraded = ['board_fallback', 'stored_fallback', 'empty_fallback'].includes(
+    String(platformResolvedSource ?? ''),
+  )
 
   return {
     ok: healthy,
@@ -4464,6 +4629,19 @@ async function getOpsMetrics() {
       universeCount: lastHomeFetchUniverseCount,
       seedSuccessCount: lastHomeFetchSeedSuccessCount,
       seedFailureCount: lastHomeFetchSeedFailureCount,
+    },
+    platform: {
+      latest: platformCurrentMetric,
+      historyPoints24h: platformHistory24h.length,
+      latestHistoryPoint: platformLatestHistoryPoint,
+      liveFetch: {
+        lastAttemptedAt: lastPlatformStatsFetchAttemptedAt,
+        lastSucceededAt: lastPlatformStatsFetchSucceededAt,
+        lastError: lastPlatformStatsFetchError,
+        lastRange: lastPlatformStatsFetchRange,
+        resolvedSource: platformResolvedSource,
+        degraded: platformDegraded,
+      },
     },
     cache: {
       searchKeys: searchCache.size,
@@ -4714,6 +4892,10 @@ const server = createServer(async (request, response) => {
         lastIngestedAt,
         lastIngestError,
         scheduledIngestEnabled: SERVER_ENABLE_SCHEDULED_INGEST,
+        platformLastFetchAttemptedAt: lastPlatformStatsFetchAttemptedAt,
+        platformLastFetchSucceededAt: lastPlatformStatsFetchSucceededAt,
+        platformLastFetchError: lastPlatformStatsFetchError,
+        platformResolvedSource: lastPlatformStatsResolvedSource,
         ingestIntervalMs: INGEST_INTERVAL_MS,
         databasePath: DATA_BACKEND === 'sqlite' ? DB_PATH : null,
       })
