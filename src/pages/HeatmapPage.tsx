@@ -1,62 +1,15 @@
-import type { ReactNode } from 'react'
 import { useMemo } from 'react'
 
 import { CategoryPerformanceMap } from '../components/market-ui/CategoryPerformanceMap'
-import { SurfacePanel } from '../components/market-ui/SurfacePanel'
 import {
   CompactNumber,
   PercentNumber,
-  WholeNumber,
 } from '../components/ui/AnimatedNumber'
 import { TOKENS } from '../design/marketTokens'
 import { useLiveBoard } from '../hooks/useLiveBoard'
 
 type HeatmapPageProps = {
   onOpenGame: (game: { universeId?: number; name: string }) => void
-}
-
-function StatTile({
-  label,
-  value,
-  detail,
-}: {
-  label: string
-  value: ReactNode
-  detail: string
-}) {
-  return (
-    <SurfacePanel style={{ gap: TOKENS.spacing.sm }}>
-      <div
-        style={{
-          color: TOKENS.colors.neutral2,
-          fontSize: TOKENS.typography.body3.size,
-          lineHeight: TOKENS.typography.body3.lineHeight,
-        }}
-      >
-        {label}
-      </div>
-      <div
-        style={{
-          color: TOKENS.colors.neutral1,
-          fontSize: TOKENS.typography.heading2.size,
-          lineHeight: TOKENS.typography.heading2.lineHeight,
-          fontWeight: TOKENS.typography.heading2.weight,
-          letterSpacing: TOKENS.typography.heading2.letterSpacing,
-        }}
-      >
-        {value}
-      </div>
-      <div
-        style={{
-          color: TOKENS.colors.neutral3,
-          fontSize: TOKENS.typography.body3.size,
-          lineHeight: TOKENS.typography.body3.lineHeight,
-        }}
-      >
-        {detail}
-      </div>
-    </SurfacePanel>
-  )
 }
 
 export default function HeatmapPage({ onOpenGame }: HeatmapPageProps) {
@@ -104,17 +57,6 @@ export default function HeatmapPage({ onOpenGame }: HeatmapPageProps) {
     [leaderboardByUniverseId, liveBoard?.genreHeatmap],
   )
 
-  const totalBuckets = liveBoard?.genreHeatmap.length ?? 0
-  const totalExperiences = useMemo(
-    () =>
-      (liveBoard?.genreHeatmap ?? []).reduce(
-        (sum, bucket) => sum + bucket.experiences.length,
-        0,
-      ),
-    [liveBoard?.genreHeatmap],
-  )
-  const leadingBucket = liveBoard?.genreHeatmap[0] ?? null
-
   return (
     <div
       style={{
@@ -130,88 +72,20 @@ export default function HeatmapPage({ onOpenGame }: HeatmapPageProps) {
           margin: '0 auto',
           padding: '32px 28px 72px',
           display: 'grid',
-          gap: TOKENS.spacing.xxl,
+          gap: TOKENS.spacing.lg,
         }}
       >
-        <section
-          style={{
-            display: 'grid',
-            gap: TOKENS.spacing.lg,
-            paddingBottom: TOKENS.spacing.xl,
-            borderBottom: `1px solid ${TOKENS.colors.surface3}`,
-          }}
-        >
-          <div style={{ display: 'grid', gap: TOKENS.spacing.xs }}>
-            <h1
-              style={{
-                margin: 0,
-                fontSize: TOKENS.typography.heading1.size,
-                lineHeight: TOKENS.typography.heading1.lineHeight,
-                fontWeight: TOKENS.typography.heading1.weight,
-                letterSpacing: TOKENS.typography.heading1.letterSpacing,
-              }}
-            >
-              Heatmap
-            </h1>
-            <p
-              style={{
-                margin: 0,
-                maxWidth: '760px',
-                color: TOKENS.colors.neutral2,
-                fontSize: TOKENS.typography.body1.size,
-                lineHeight: TOKENS.typography.body1.lineHeight,
-              }}
-            >
-              Market-wide genre heatmap built from the live board. Click any tile to open the
-              experience behind it.
-            </p>
-          </div>
+        <CategoryPerformanceMap
+          sections={heatmapSections}
+          loading={isLoading && heatmapSections.length === 0}
+          onItemClick={(item) =>
+            onOpenGame({
+              universeId: typeof item.id === 'number' ? item.id : undefined,
+              name: item.title,
+            })}
+        />
 
-          {error && !liveBoard ? (
-            <SurfacePanel title="Unable to load heatmap">
-              <div
-                style={{
-                  color: TOKENS.colors.neutral2,
-                  fontSize: TOKENS.typography.body2.size,
-                  lineHeight: TOKENS.typography.body2.lineHeight,
-                }}
-              >
-                {error}
-              </div>
-            </SurfacePanel>
-          ) : null}
-        </section>
-
-        <section
-          style={{
-            display: 'grid',
-            gap: TOKENS.spacing.lg,
-            gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
-          }}
-        >
-          <StatTile
-            label="Genres tracked"
-            value={<WholeNumber value={totalBuckets} />}
-            detail="Distinct genre buckets represented in the current board snapshot."
-          />
-          <StatTile
-            label="Experiences surfaced"
-            value={<WholeNumber value={totalExperiences} />}
-            detail="Tiles currently rendered across the market heatmap."
-          />
-          <StatTile
-            label="Leading genre"
-            value={leadingBucket?.name ?? 'Unavailable'}
-            detail={leadingBucket?.ccuLabel ?? 'Waiting for live board data.'}
-          />
-        </section>
-
-        <section
-          style={{
-            display: 'grid',
-            gap: TOKENS.spacing.md,
-          }}
-        >
+        {error && !liveBoard ? (
           <div
             style={{
               color: TOKENS.colors.neutral2,
@@ -219,19 +93,9 @@ export default function HeatmapPage({ onOpenGame }: HeatmapPageProps) {
               lineHeight: TOKENS.typography.body2.lineHeight,
             }}
           >
-            Tile color reflects weekly change. Tile area reflects live audience size.
+            {error}
           </div>
-
-          <CategoryPerformanceMap
-            sections={heatmapSections}
-            loading={isLoading && heatmapSections.length === 0}
-            onItemClick={(item) =>
-              onOpenGame({
-                universeId: typeof item.id === 'number' ? item.id : undefined,
-                name: item.title,
-              })}
-          />
-        </section>
+        ) : null}
       </main>
     </div>
   )

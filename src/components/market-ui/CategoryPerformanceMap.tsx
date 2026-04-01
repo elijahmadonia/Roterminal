@@ -126,7 +126,16 @@ function CategoryTile({
   const large = area > 12000
   const medium = area > 5200
   const small = area > 2200
-  const showIcon = area > 700 && Boolean(item.imageUrl)
+  const universeId = Number(item.id)
+  const retryUrl =
+    retryNonce > 0 && Number.isFinite(universeId) && universeId > 0
+      ? `/api/game-icon/${universeId}?refresh=${retryNonce}`
+      : null
+  const activeImageUrl =
+    retryUrl ??
+    item.imageUrl ??
+    (Number.isFinite(universeId) && universeId > 0 ? `/api/game-icon/${universeId}` : null)
+  const showIcon = area > 700 && Boolean(activeImageUrl)
   const showTitle = area > 1200
   const showValue = area > 1700
   const imageSize = Math.max(
@@ -141,15 +150,6 @@ function CategoryTile({
     showTitle && titleMaxChars > 0 && item.title.length > titleMaxChars
       ? `${item.title.slice(0, titleMaxChars)}…`
       : item.title
-  const universeId = Number(item.id)
-  const retryUrl =
-    retryNonce > 0 && Number.isFinite(universeId) && universeId > 0
-      ? `/api/game-icon/${universeId}?refresh=${retryNonce}`
-      : null
-  const activeImageUrl =
-    retryUrl ??
-    item.imageUrl ??
-    (Number.isFinite(universeId) && universeId > 0 ? `/api/game-icon/${universeId}` : null)
   const showLoadedImage =
     Boolean(activeImageUrl) &&
     loadedImageUrl === activeImageUrl &&
