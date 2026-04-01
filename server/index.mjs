@@ -4019,8 +4019,10 @@ function getOpsMetrics() {
   const missingIngest = !Number.isFinite(lastIngestedAtMs)
   const activeLeaseExpired =
     Number.isFinite(activeLeaseExpiresAtMs) && activeLeaseExpiresAtMs <= Date.now()
-  const healthy =
-    lastIngestError == null && !missingIngest && !staleIngest && !activeLeaseExpired
+  const ingestDisabled = !SERVER_ENABLE_SCHEDULED_INGEST
+  const healthy = ingestDisabled
+    ? true
+    : lastIngestError == null && !missingIngest && !staleIngest && !activeLeaseExpired
 
   return {
     ok: healthy,
@@ -4060,6 +4062,7 @@ function getOpsMetrics() {
     ingestStaleAfterMs: INGEST_STALE_AFTER_MS,
     ingest: {
       healthy,
+      disabled: ingestDisabled,
       missing: missingIngest,
       stale: staleIngest,
       activeLeaseExpired,
