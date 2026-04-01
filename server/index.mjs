@@ -539,7 +539,7 @@ function buildSecurityHeaders(extraHeaders = {}) {
     'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
     'Cross-Origin-Opener-Policy': 'same-origin',
     'Content-Security-Policy':
-      "default-src 'self'; connect-src 'self' https://apis.roblox.com https://games.roblox.com https://thumbnails.roblox.com; img-src 'self' blob: data: https://tr.rbxcdn.com https://*.rbxcdn.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; script-src 'self'; base-uri 'self'; object-src 'none'",
+      "default-src 'self'; connect-src 'self' https://apis.roblox.com https://games.roblox.com https://thumbnails.roblox.com https://tr.rbxcdn.com https://*.rbxcdn.com; img-src 'self' blob: data: https://tr.rbxcdn.com https://*.rbxcdn.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; script-src 'self'; base-uri 'self'; object-src 'none'",
     ...extraHeaders,
   }
 }

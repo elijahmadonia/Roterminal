@@ -1078,16 +1078,15 @@ export default function GamePage({
 
   useEffect(() => {
     setSharePreviewEnabled(false)
+    setInlineSharePreviewUrl(null)
+    setSharePreviewFile(null)
+    setSharePreviewUrl((current) => {
+      if (current) {
+        URL.revokeObjectURL(current)
+      }
 
-    if (!gameDetail?.game.universeId) {
-      return
-    }
-
-    const timeoutId = window.setTimeout(() => {
-      setSharePreviewEnabled(true)
-    }, 800)
-
-    return () => window.clearTimeout(timeoutId)
+      return null
+    })
   }, [gameDetail?.game.universeId])
 
   const seedLineData = toLiveLineData(gameDetail?.timeline ?? [])
