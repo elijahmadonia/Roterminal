@@ -94,7 +94,7 @@ The current production-safe deployment path is a single always-on backend servic
 1. Deploy the repo as a Render web service using [render.yaml](/Users/lij/Desktop/Roterminal/render.yaml).
 2. Keep `startCommand` on `npm run start:server` so the API and scheduled ingest run in the same process.
 3. Keep the SQLite database on the mounted disk via `ROTERMINAL_DB_PATH=/opt/render/project/src/data/roterminal.db`.
-4. Use `/ready` for health checks. It now fails if ingest errors persist or if the warehouse stops receiving fresh successful runs for too long.
+4. Use `/health` for the Render deployment health check. Keep `/ready` for operational checks that include ingest freshness.
 
 This is the right move for now because the app currently uses SQLite. Splitting API and worker into separate services requires moving the warehouse to a network database like Postgres first. Until then, one always-on service plus persistent disk is the correct "legit" setup.
 
