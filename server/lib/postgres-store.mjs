@@ -306,6 +306,15 @@ async function applyMigrations(pool) {
       )
     `,
     `
+      CREATE TABLE IF NOT EXISTS app_state (
+        state_key TEXT PRIMARY KEY,
+        observed_at TIMESTAMPTZ NOT NULL,
+        source TEXT NOT NULL,
+        payload_json JSONB NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `,
+    `
       CREATE TABLE IF NOT EXISTS ingest_runs (
         id BIGSERIAL PRIMARY KEY,
         trigger TEXT NOT NULL,
@@ -1082,6 +1091,56 @@ export async function createPostgresStore() {
     }
   }
 
+  async function getBoardSnapshot(range = '24h') {
+    const result = await pool.query(
+      `
+        SELECT payload_json
+        FROM app_state
+        WHERE state_key = $1
+      `,
+      [`board_snapshot:${range}`],
+    )
+
+    return result.rows[0]?.payload_json ?? null
+  }
+
+  async function recordBoardSnapshot(
+    range,
+    payload,
+    {
+      observedAt = new Date().toISOString(),
+      source = 'worker_live',
+    } = {},
+  ) {
+    if (!range || payload == null) {
+      return
+    }
+
+    await pool.query(
+      `
+        INSERT INTO app_state (
+          state_key,
+          observed_at,
+          source,
+          payload_json
+        )
+        VALUES ($1, $2, $3, $4::jsonb)
+        ON CONFLICT (state_key) DO UPDATE SET
+          observed_at = EXCLUDED.observed_at,
+          source = EXCLUDED.source,
+          payload_json = EXCLUDED.payload_json,
+          updated_at = NOW()
+        WHERE EXCLUDED.observed_at >= app_state.observed_at
+      `,
+      [
+        `board_snapshot:${range}`,
+        normalizeTimestamp(observedAt),
+        String(source),
+        JSON.stringify(payload),
+      ],
+    )
+  }
+
   async function recordPlatformHistoryPoints(points, source = 'live') {
     if (!Array.isArray(points) || points.length === 0) {
       return 0
@@ -1256,6 +1315,7 @@ export async function createPostgresStore() {
     countSnapshots,
     countTrackedUniverseIds,
     appendTrackedUniverseIds,
+    getBoardSnapshot,
     enqueueImportJob,
     finishIngestRun,
     getActiveIngestLease,
@@ -1270,6 +1330,7 @@ export async function createPostgresStore() {
     getTrackedUniverseRecords,
     getTrackedUniverseIds,
     importLegacySnapshot,
+    recordBoardSnapshot,
     recordGamePageSnapshot,
     recordPlatformCurrentMetric,
     recordPlatformHistoryPoints,

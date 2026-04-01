@@ -31,6 +31,11 @@ import {
   UNIVERSE_FETCH_BATCH_CONCURRENCY,
 } from './config.mjs'
 import { migrateLegacyJsonIfNeeded } from './lib/bootstrap.mjs'
+import {
+  BOARD_WATCHLIST_LIMIT,
+  buildBoardPayload,
+  getBoardHistoryCutoffIso,
+} from './lib/board-snapshot.mjs'
 import { createStore } from './lib/store.mjs'
 
 const PLATFORM_SORT_IDS = [
@@ -901,6 +906,39 @@ async function pollTrackedUniverses(trigger = 'worker') {
     const observedAt = new Date().toISOString()
 
     await database.recordSnapshots(snapshotGames, {
+      observedAt,
+      source: 'worker_live',
+    })
+
+    const limitedTrackedGames = [...snapshotGames]
+      .sort((left, right) => (Number(right.playing) || 0) - (Number(left.playing) || 0))
+      .slice(0, BOARD_WATCHLIST_LIMIT)
+    const boardHistoryCutoffIso = getBoardHistoryCutoffIso('24h')
+    const platformHistoryMap = await database.getHistoryMap(
+      discoveryGames.map((game) => game.universeId),
+      boardHistoryCutoffIso,
+    )
+    const trackedHistoryMap = await database.getHistoryMap(
+      limitedTrackedGames.map((game) => game.universeId),
+      boardHistoryCutoffIso,
+    )
+    const boardPayload = buildBoardPayload({
+      games: discoveryGames,
+      historyMap: platformHistoryMap,
+      source: 'live',
+      range: '24h',
+      trackedGames: {
+        games: limitedTrackedGames,
+        historyMap: trackedHistoryMap,
+      },
+      platformMeta: {
+        discoveredSorts: PLATFORM_SORT_IDS,
+      },
+      lastIngestedAt: observedAt,
+      ingestIntervalMs: INGEST_INTERVAL_MS,
+    })
+
+    await database.recordBoardSnapshot('24h', boardPayload, {
       observedAt,
       source: 'worker_live',
     })

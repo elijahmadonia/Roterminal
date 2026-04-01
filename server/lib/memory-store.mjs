@@ -109,6 +109,7 @@ export async function createMemoryStore() {
   const currentMetricsByUniverseId = new Map()
   const observationHistoryByUniverseId = new Map()
   const platformHistoryByTimestamp = new Map()
+  const appState = new Map()
   const ingestLeases = new Map()
   const importJobs = []
   const ingestRuns = []
@@ -658,6 +659,28 @@ export async function createMemoryStore() {
       .map((point) => ({ ...point }))
   }
 
+  function getBoardSnapshot(range = '24h') {
+    const entry = appState.get(`board_snapshot:${range}`)
+    return entry ? structuredClone(entry) : null
+  }
+
+  function recordBoardSnapshot(
+    range,
+    payload,
+    {
+      observedAt = new Date().toISOString(),
+      source = 'worker_live',
+    } = {},
+  ) {
+    if (!range || payload == null) {
+      return
+    }
+
+    void observedAt
+    void source
+    appState.set(`board_snapshot:${range}`, structuredClone(payload))
+  }
+
   function recordGamePageSnapshot() {
     // The in-memory backend intentionally avoids persisting request-time page history.
   }
@@ -674,6 +697,7 @@ export async function createMemoryStore() {
     countSnapshots,
     countTrackedUniverseIds,
     appendTrackedUniverseIds,
+    getBoardSnapshot,
     enqueueImportJob,
     finishIngestRun,
     getActiveIngestLease,
@@ -688,6 +712,7 @@ export async function createMemoryStore() {
     getTrackedUniverseRecords,
     getTrackedUniverseIds,
     importLegacySnapshot,
+    recordBoardSnapshot,
     recordGamePageSnapshot,
     recordPlatformCurrentMetric,
     recordPlatformHistoryPoints,

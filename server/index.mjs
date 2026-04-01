@@ -324,6 +324,7 @@ const {
   countTrackedUniverseIds,
   finishIngestRun,
   getActiveIngestLease,
+  getBoardSnapshot,
   getHistoryMap,
   getLatestIngestRun,
   getLatestSnapshotGames,
@@ -331,6 +332,7 @@ const {
   getTrackedDiscoverySourceCounts,
   getTrackedTierCounts,
   getTrackedUniverseIds,
+  recordBoardSnapshot,
   recordGamePageSnapshot,
   recordPlatformCurrentMetric,
   recordSnapshots,
@@ -3979,6 +3981,51 @@ async function fetchPlatformBoardPayload(range = '24h') {
   if (cachedBoard) {
     return cachedBoard
   }
+
+  async function buildSnapshotBoardPayload() {
+    const trackedUniverseIds = await getTrackedUniverseIds()
+    const trackedIds = trackedUniverseIds.length > 0 ? trackedUniverseIds : DEFAULT_TRACKED_IDS
+    const snapshotGames = await getLatestSnapshotGames(trackedIds)
+
+    if (snapshotGames.length === 0) {
+      return null
+    }
+
+    const limitedTrackedGames = [...snapshotGames]
+      .sort((left, right) => (Number(right.playing) || 0) - (Number(left.playing) || 0))
+      .slice(0, BOARD_WATCHLIST_LIMIT)
+    const limitedTrackedIds = limitedTrackedGames.map((game) => game.universeId)
+    const historyMap = await getHistoryMap(limitedTrackedIds, getBoardHistoryCutoffIso(range))
+
+    return buildBoardPayload(
+      limitedTrackedGames,
+      historyMap,
+      'database',
+      range,
+      {
+        games: limitedTrackedGames,
+        historyMap,
+      },
+      {
+        discoveredSorts: [],
+      },
+    )
+  }
+
+  if (range === '24h') {
+    const storedBoard = await getBoardSnapshot(range)
+
+    if (storedBoard) {
+      writeCache(boardCache, range, storedBoard, getBoardPayloadCacheTtlMs(range))
+      return storedBoard
+    }
+
+    const snapshotBoard = await buildSnapshotBoardPayload()
+    if (snapshotBoard) {
+      writeCache(boardCache, range, snapshotBoard, getBoardPayloadCacheTtlMs(range))
+      return snapshotBoard
+    }
+  }
   try {
     const trackedUniverseIds = await getTrackedUniverseIds()
     const trackedIds = trackedUniverseIds.length > 0 ? trackedUniverseIds : DEFAULT_TRACKED_IDS
@@ -4028,6 +4075,12 @@ async function fetchPlatformBoardPayload(range = '24h') {
     )
 
     writeCache(boardCache, range, payload, getBoardPayloadCacheTtlMs(range))
+    if (range === '24h') {
+      await recordBoardSnapshot(range, payload, {
+        observedAt: new Date().toISOString(),
+        source: platformSet.source,
+      })
+    }
     return payload
   } catch (error) {
     const staleBoard = readCacheEntry(boardCache, range)
@@ -4035,29 +4088,9 @@ async function fetchPlatformBoardPayload(range = '24h') {
       return staleBoard.value
     }
 
-    const trackedUniverseIds = await getTrackedUniverseIds()
-    const trackedIds = trackedUniverseIds.length > 0 ? trackedUniverseIds : DEFAULT_TRACKED_IDS
-    const snapshotGames = await getLatestSnapshotGames(trackedIds)
-
-    if (snapshotGames.length > 0) {
-      const limitedTrackedGames = [...snapshotGames]
-        .sort((left, right) => (Number(right.playing) || 0) - (Number(left.playing) || 0))
-        .slice(0, BOARD_WATCHLIST_LIMIT)
-      const limitedTrackedIds = limitedTrackedGames.map((game) => game.universeId)
-      const historyMap = await getHistoryMap(limitedTrackedIds, getBoardHistoryCutoffIso(range))
-      return buildBoardPayload(
-        limitedTrackedGames,
-        historyMap,
-        'database',
-        range,
-        {
-          games: limitedTrackedGames,
-          historyMap,
-        },
-        {
-          discoveredSorts: [],
-        },
-      )
+    const snapshotBoard = await buildSnapshotBoardPayload()
+    if (snapshotBoard) {
+      return snapshotBoard
     }
 
     throw error

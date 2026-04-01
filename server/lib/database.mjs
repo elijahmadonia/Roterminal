@@ -539,6 +539,20 @@ const MIGRATIONS = [
       `)
     },
   },
+  {
+    id: '009_app_state',
+    up(db) {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS app_state (
+          state_key TEXT PRIMARY KEY,
+          observed_at TEXT NOT NULL,
+          source TEXT NOT NULL,
+          payload_json TEXT NOT NULL,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+      `)
+    },
+  },
 ]
 
 function applyMigrations(db) {
@@ -865,6 +879,31 @@ export async function createDatabase() {
       source = excluded.source,
       updated_at = CURRENT_TIMESTAMP
     WHERE excluded.observed_at >= platform_current_metrics.observed_at
+  `)
+
+  const getAppStateStmt = db.prepare(`
+    SELECT
+      observed_at,
+      source,
+      payload_json
+    FROM app_state
+    WHERE state_key = ?
+  `)
+
+  const upsertAppStateStmt = db.prepare(`
+    INSERT INTO app_state (
+      state_key,
+      observed_at,
+      source,
+      payload_json
+    )
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(state_key) DO UPDATE SET
+      observed_at = excluded.observed_at,
+      source = excluded.source,
+      payload_json = excluded.payload_json,
+      updated_at = CURRENT_TIMESTAMP
+    WHERE excluded.observed_at >= app_state.observed_at
   `)
 
   const insertObservationStmt = db.prepare(`
@@ -1850,6 +1889,40 @@ export async function createDatabase() {
     )
   }
 
+  function getBoardSnapshot(range = '24h') {
+    const row = getAppStateStmt.get(`board_snapshot:${range}`)
+
+    if (!row?.payload_json) {
+      return null
+    }
+
+    try {
+      return JSON.parse(row.payload_json)
+    } catch {
+      return null
+    }
+  }
+
+  function recordBoardSnapshot(
+    range,
+    payload,
+    {
+      observedAt = new Date().toISOString(),
+      source = 'worker_live',
+    } = {},
+  ) {
+    if (!range || payload == null) {
+      return
+    }
+
+    upsertAppStateStmt.run(
+      `board_snapshot:${range}`,
+      observedAt,
+      source,
+      toJsonText(payload),
+    )
+  }
+
   function searchLocalGames(query, limit = 8) {
     const normalized = `%${query.trim().toLowerCase()}%`
     const rows = db
@@ -2349,6 +2422,7 @@ export async function createDatabase() {
     countSnapshots,
     countTrackedUniverseIds: () => countTrackedStmt.get().total,
     appendTrackedUniverseIds,
+    getBoardSnapshot,
     getTrackedDiscoverySourceCounts,
     getTrackedTierCounts,
     finishExternalHistoryImportRun,
@@ -2362,6 +2436,7 @@ export async function createDatabase() {
     getUniverseRootPlaceMap,
     getTrackedUniverseIds,
     importLegacySnapshot,
+    recordBoardSnapshot,
     recordGamePageSnapshot,
     recordPlatformCurrentMetric,
     recordExternalHistory,
