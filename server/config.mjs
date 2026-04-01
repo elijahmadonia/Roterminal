@@ -62,8 +62,8 @@ export const DB_PATH = path.resolve(
 export const LEGACY_STATE_PATH = path.join(DATA_DIR, 'roterminal-state.json')
 
 export const PORT = readNumberEnv('ROTERMINAL_SERVER_PORT', 8787)
-const IS_RENDER = process.env.RENDER?.trim().toLowerCase() === 'true'
-const RENDER_SERVICE_TYPE = readStringEnv('RENDER_SERVICE_TYPE', '')
+export const IS_RENDER = process.env.RENDER?.trim().toLowerCase() === 'true'
+export const RENDER_SERVICE_TYPE = readStringEnv('RENDER_SERVICE_TYPE', '')
 export const POSTGRES_URL = readStringEnv(
   'ROTERMINAL_POSTGRES_URL',
   readStringEnv('DATABASE_URL', ''),
@@ -105,9 +105,18 @@ export const DATA_BACKEND = readStringEnv(
       ? 'memory'
       : 'sqlite',
 )
+export const REQUIRE_PERSISTENT_STORE = readBooleanEnv(
+  'ROTERMINAL_REQUIRE_PERSISTENT_STORE',
+  IS_RENDER,
+)
 export const ALLOW_LIVE_READ_FALLBACK = readBooleanEnv(
   'ROTERMINAL_ALLOW_LIVE_READ_FALLBACK',
   DATA_BACKEND !== 'postgres',
+)
+export const POSTGRES_POOL_MAX = readNumberEnv('ROTERMINAL_POSTGRES_POOL_MAX', 10)
+export const POSTGRES_IDLE_TIMEOUT_MS = readNumberEnv(
+  'ROTERMINAL_POSTGRES_IDLE_TIMEOUT_MS',
+  30_000,
 )
 export const ROBLOX_SECURITY_COOKIE = readStringEnv('ROBLOX_SECURITY_COOKIE', '')
 export const ROBLOX_SECURITY_COOKIES = [...new Set([

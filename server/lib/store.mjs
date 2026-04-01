@@ -1,6 +1,24 @@
-import { DATA_BACKEND } from '../config.mjs'
+import {
+  DATA_BACKEND,
+  IS_RENDER,
+  POSTGRES_URL,
+  REQUIRE_PERSISTENT_STORE,
+  RENDER_SERVICE_TYPE,
+} from '../config.mjs'
 
 export async function createStore() {
+  if (REQUIRE_PERSISTENT_STORE && DATA_BACKEND !== 'postgres') {
+    const renderHint = IS_RENDER
+      ? ` Render service type: ${RENDER_SERVICE_TYPE || 'unknown'}.`
+      : ''
+    const postgresHint = POSTGRES_URL
+      ? ''
+      : ' DATABASE_URL/ROTERMINAL_POSTGRES_URL is missing.'
+    throw new Error(
+      `Persistent production storage is required, but DATA_BACKEND resolved to "${DATA_BACKEND}" instead of "postgres".${postgresHint}${renderHint}`,
+    )
+  }
+
   switch (DATA_BACKEND) {
     case 'memory': {
       const { createMemoryStore } = await import('./memory-store.mjs')

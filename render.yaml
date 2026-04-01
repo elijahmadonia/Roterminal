@@ -18,10 +18,14 @@ services:
         value: 10000
       - key: ROTERMINAL_DATA_BACKEND
         value: postgres
+      - key: ROTERMINAL_REQUIRE_PERSISTENT_STORE
+        value: true
       - key: ROTERMINAL_SERVER_ENABLE_SCHEDULED_INGEST
         value: false
       - key: ROTERMINAL_ALLOW_LIVE_READ_FALLBACK
         value: false
+      - key: ROTERMINAL_POSTGRES_POOL_MAX
+        value: 10
       - key: ROTERMINAL_INGEST_INTERVAL_MINUTES
         value: 5
       - key: ROTERMINAL_INGEST_STALE_AFTER_MS
@@ -45,6 +49,10 @@ services:
         value: 24.1.0
       - key: ROTERMINAL_DATA_BACKEND
         value: postgres
+      - key: ROTERMINAL_REQUIRE_PERSISTENT_STORE
+        value: true
+      - key: ROTERMINAL_POSTGRES_POOL_MAX
+        value: 10
       - key: ROTERMINAL_INGEST_INTERVAL_MINUTES
         value: 5
       - key: ROTERMINAL_INGEST_STALE_AFTER_MS

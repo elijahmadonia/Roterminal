@@ -1,13 +1,16 @@
 import crypto from 'node:crypto'
 
 import {
+  DATA_BACKEND,
   DISCOVERY_LIVE_POLL_LIMIT,
   DEFAULT_TRACKED_IDS,
   DISCOVERY_CREATOR_EXPANSION_LIMIT,
   DISCOVERY_CREATOR_GAME_LIMIT,
   INGEST_LEASE_TTL_MS,
   INGEST_INTERVAL_MS,
+  POSTGRES_URL,
   MAX_FETCH_RETRIES,
+  RENDER_SERVICE_TYPE,
   ROBLOX_SECURITY_COOKIES,
   RETRY_BASE_DELAY_MS,
   REQUEST_TIMEOUT_MS,
@@ -80,6 +83,9 @@ const SEARCH_DISCOVERY_STOPWORDS = new Set([
 ])
 
 const database = await createStore()
+console.log(
+  `[roterminal-worker] boot backend=${DATA_BACKEND} renderService=${RENDER_SERVICE_TYPE || 'local'} persistentStore=${POSTGRES_URL ? 'postgres-configured' : 'none'}`,
+)
 await migrateLegacyJsonIfNeeded(database)
 await database.recoverStaleIngestRuns()
 

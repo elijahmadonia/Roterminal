@@ -2,6 +2,8 @@ import { Pool } from 'pg'
 
 import {
   INGEST_RUN_STALE_AFTER_MS,
+  POSTGRES_IDLE_TIMEOUT_MS,
+  POSTGRES_POOL_MAX,
   POSTGRES_URL,
   SNAPSHOT_RETENTION_MS,
 } from '../config.mjs'
@@ -370,8 +372,11 @@ export async function createPostgresStore() {
 
   const pool = new Pool({
     connectionString: POSTGRES_URL,
-    max: 10,
-    idleTimeoutMillis: 30_000,
+    max: POSTGRES_POOL_MAX,
+    idleTimeoutMillis: POSTGRES_IDLE_TIMEOUT_MS,
+    ssl: POSTGRES_URL.includes('render.com')
+      ? { rejectUnauthorized: false }
+      : undefined,
   })
 
   await pool.query('SELECT 1')
