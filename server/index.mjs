@@ -77,7 +77,7 @@ function getBoardPayloadCacheTtlMs(range) {
     case '30m':
     case '1h':
     case '24h':
-      return Math.min(BOARD_CACHE_TTL_MS, 5_000)
+      return Math.min(BOARD_CACHE_TTL_MS, 10_000)
     case '6h':
       return Math.min(BOARD_CACHE_TTL_MS, 10_000)
     case '7d':
@@ -93,10 +93,10 @@ function getGamePagePayloadCacheTtlMs(range, detailLevel = 'full') {
   const baseTtlMs = getBoardPayloadCacheTtlMs(range)
 
   if (detailLevel === 'core') {
-    return Math.min(baseTtlMs, 5_000)
+    return Math.min(baseTtlMs, 15_000)
   }
 
-  return Math.min(baseTtlMs, 15_000)
+  return Math.min(baseTtlMs, 30_000)
 }
 const OFFICIAL_PLATFORM_SCALE = {
   value: '45M',
@@ -539,7 +539,7 @@ function buildSecurityHeaders(extraHeaders = {}) {
     'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
     'Cross-Origin-Opener-Policy': 'same-origin',
     'Content-Security-Policy':
-      "default-src 'self'; connect-src 'self' https://apis.roblox.com https://games.roblox.com https://thumbnails.roblox.com; img-src 'self' data: https://tr.rbxcdn.com https://*.rbxcdn.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; script-src 'self'; base-uri 'self'; object-src 'none'",
+      "default-src 'self'; connect-src 'self' https://apis.roblox.com https://games.roblox.com https://thumbnails.roblox.com; img-src 'self' blob: data: https://tr.rbxcdn.com https://*.rbxcdn.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; script-src 'self'; base-uri 'self'; object-src 'none'",
     ...extraHeaders,
   }
 }
@@ -818,6 +818,63 @@ function mergeSnapshotGames(...gameSets) {
   }
 
   return [...gamesByUniverseId.values()]
+}
+
+function findCachedGameByUniverseId(universeId) {
+  const targetUniverseId = Number(universeId)
+
+  if (!Number.isFinite(targetUniverseId) || targetUniverseId <= 0) {
+    return null
+  }
+
+  for (const cache of [gamesCache, platformCache]) {
+    for (const entry of cache.values()) {
+      const candidateList = Array.isArray(entry?.value)
+        ? entry.value
+        : Array.isArray(entry?.value?.games)
+          ? entry.value.games
+          : []
+      const match = candidateList.find((game) => Number(game?.universeId) === targetUniverseId)
+      if (match) {
+        return match
+      }
+    }
+  }
+
+  for (const entry of gamePageCache.values()) {
+    const game = entry?.value?.game
+    if (Number(game?.universeId) === targetUniverseId) {
+      return {
+        universeId: game.universeId,
+        rootPlaceId: game.rootPlaceId ?? null,
+        name: game.name,
+        description: game.description ?? '',
+        creatorName: game.creatorName ?? 'Unknown creator',
+        creatorId: game.creatorId ?? 0,
+        creatorType: game.creatorType ?? 'User',
+        creatorHasVerifiedBadge: Boolean(game.creatorHasVerifiedBadge),
+        genre: game.genre ?? 'Unclassified',
+        genrePrimary: game.genrePrimary ?? game.genre ?? 'Unclassified',
+        genreSecondary: game.genreSecondary ?? null,
+        playing: game.playing ?? 0,
+        visits: game.visits ?? 0,
+        favoritedCount: game.favoritedCount ?? 0,
+        upVotes: game.upVotes ?? 0,
+        downVotes: game.downVotes ?? 0,
+        approval: game.approval ?? 0,
+        price: game.price ?? null,
+        maxPlayers: game.maxPlayers ?? null,
+        created: game.created ?? null,
+        updated: game.updated ?? new Date().toISOString(),
+        createVipServersAllowed: Boolean(game.createVipServersAllowed),
+        thumbnailUrl: game.thumbnailUrl,
+        bannerUrl: game.bannerUrl,
+        screenshotUrls: Array.isArray(game.screenshotUrls) ? game.screenshotUrls : [],
+      }
+    }
+  }
+
+  return null
 }
 
 function buildTimeline(historyMap, universeIds, games, range = '24h') {
@@ -3922,56 +3979,89 @@ async function fetchPlatformBoardPayload(range = '24h') {
   if (cachedBoard) {
     return cachedBoard
   }
+  try {
+    const trackedUniverseIds = await getTrackedUniverseIds()
+    const trackedIds = trackedUniverseIds.length > 0 ? trackedUniverseIds : DEFAULT_TRACKED_IDS
+    const trackedSnapshotGames = await getLatestSnapshotGames(trackedIds)
+    const [platformSet, trackedLiveFallback] = await Promise.all([
+      fetchPlatformDiscoverySet(),
+      trackedSnapshotGames.length > 0
+        ? Promise.resolve({ games: trackedSnapshotGames, source: 'database' })
+        : fetchUniverseGames(trackedIds),
+    ])
+    lastBoardUniverseIds = platformSet.discoveredUniverseIds
 
-  const trackedUniverseIds = await getTrackedUniverseIds()
-  const trackedIds = trackedUniverseIds.length > 0 ? trackedUniverseIds : DEFAULT_TRACKED_IDS
-  const trackedSnapshotGames = await getLatestSnapshotGames(trackedIds)
-  const [platformSet, trackedLiveFallback] = await Promise.all([
-    fetchPlatformDiscoverySet(),
-    trackedSnapshotGames.length > 0
-      ? Promise.resolve({ games: trackedSnapshotGames, source: 'database' })
-      : fetchUniverseGames(trackedIds),
-  ])
-  lastBoardUniverseIds = platformSet.discoveredUniverseIds
+    const liveSnapshotGames = mergeSnapshotGames(
+      platformSet.source === 'live' ? platformSet.games : [],
+      trackedLiveFallback.source === 'live' ? trackedLiveFallback.games : [],
+    )
 
-  const liveSnapshotGames = mergeSnapshotGames(
-    platformSet.source === 'live' ? platformSet.games : [],
-    trackedLiveFallback.source === 'live' ? trackedLiveFallback.games : [],
-  )
+    if (SERVER_ENABLE_SCHEDULED_INGEST && liveSnapshotGames.length > 0) {
+      await recordSnapshots(liveSnapshotGames, {
+        observedAt: new Date().toISOString(),
+      })
+    }
 
-  if (SERVER_ENABLE_SCHEDULED_INGEST && liveSnapshotGames.length > 0) {
-    await recordSnapshots(liveSnapshotGames, {
-      observedAt: new Date().toISOString(),
-    })
+    const limitedTrackedGames = [...trackedLiveFallback.games]
+      .sort((left, right) => (Number(right.playing) || 0) - (Number(left.playing) || 0))
+      .slice(0, BOARD_WATCHLIST_LIMIT)
+    const limitedTrackedIds = limitedTrackedGames.map((game) => game.universeId)
+    const boardHistoryCutoffIso = getBoardHistoryCutoffIso(range)
+    const platformHistoryMap = await getHistoryMap(
+      platformSet.discoveredUniverseIds,
+      boardHistoryCutoffIso,
+    )
+    const trackedHistoryMap = await getHistoryMap(limitedTrackedIds, boardHistoryCutoffIso)
+
+    const payload = buildBoardPayload(
+      platformSet.games,
+      platformHistoryMap,
+      platformSet.source,
+      range,
+      {
+        games: limitedTrackedGames,
+        historyMap: trackedHistoryMap,
+      },
+      {
+        discoveredSorts: platformSet.discoveredSorts,
+      },
+    )
+
+    writeCache(boardCache, range, payload, getBoardPayloadCacheTtlMs(range))
+    return payload
+  } catch (error) {
+    const staleBoard = readCacheEntry(boardCache, range)
+    if (staleBoard?.value) {
+      return staleBoard.value
+    }
+
+    const trackedUniverseIds = await getTrackedUniverseIds()
+    const trackedIds = trackedUniverseIds.length > 0 ? trackedUniverseIds : DEFAULT_TRACKED_IDS
+    const snapshotGames = await getLatestSnapshotGames(trackedIds)
+
+    if (snapshotGames.length > 0) {
+      const limitedTrackedGames = [...snapshotGames]
+        .sort((left, right) => (Number(right.playing) || 0) - (Number(left.playing) || 0))
+        .slice(0, BOARD_WATCHLIST_LIMIT)
+      const limitedTrackedIds = limitedTrackedGames.map((game) => game.universeId)
+      const historyMap = await getHistoryMap(limitedTrackedIds, getBoardHistoryCutoffIso(range))
+      return buildBoardPayload(
+        limitedTrackedGames,
+        historyMap,
+        'database',
+        range,
+        {
+          games: limitedTrackedGames,
+          historyMap,
+        },
+        {
+          discoveredSorts: [],
+        },
+      )
+    }
+
+    throw error
   }
-
-  const limitedTrackedGames = [...trackedLiveFallback.games]
-    .sort((left, right) => (Number(right.playing) || 0) - (Number(left.playing) || 0))
-    .slice(0, BOARD_WATCHLIST_LIMIT)
-  const limitedTrackedIds = limitedTrackedGames.map((game) => game.universeId)
-  const boardHistoryCutoffIso = getBoardHistoryCutoffIso(range)
-  const platformHistoryMap = await getHistoryMap(
-    platformSet.discoveredUniverseIds,
-    boardHistoryCutoffIso,
-  )
-  const trackedHistoryMap = await getHistoryMap(limitedTrackedIds, boardHistoryCutoffIso)
-
-  const payload = buildBoardPayload(
-    platformSet.games,
-    platformHistoryMap,
-    platformSet.source,
-    range,
-    {
-      games: limitedTrackedGames,
-      historyMap: trackedHistoryMap,
-    },
-    {
-      discoveredSorts: platformSet.discoveredSorts,
-    },
-  )
-
-  writeCache(boardCache, range, payload, getBoardPayloadCacheTtlMs(range))
-  return payload
 }
 
 async function fetchBoardLivePointPayload() {
@@ -4103,7 +4193,9 @@ async function fetchGamePagePayload(universeId, range = '24h', detailLevel = 'fu
       return stalePayload.value
     }
 
-    const fallbackGame = (await getLatestSnapshotGames([universeId]))[0]
+    const fallbackGame =
+      findCachedGameByUniverseId(universeId) ??
+      (await getLatestSnapshotGames([universeId]))[0]
     if (fallbackGame) {
       const trackedUniverseIds = await getTrackedUniverseIds()
       return buildGameDetailPayload(
