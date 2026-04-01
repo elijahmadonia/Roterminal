@@ -2428,6 +2428,31 @@ function normalizePlatformStatsPayload(payload, source, range = '24h') {
   }
 }
 
+function buildPlatformStatsFallbackPayload(
+  latestValue,
+  latestTimestamp = new Date().toISOString(),
+  range = '24h',
+  source = 'fallback',
+) {
+  return {
+    status: {
+      label: 'Full platform CCU fallback',
+      detail: `${formatWholeNumber(latestValue)} players across the tracked Roblox board right now.`,
+      tone: 'neutral',
+    },
+    source,
+    latest: {
+      value: latestValue,
+      timestamp: latestTimestamp,
+      source,
+    },
+    peak: null,
+    timeline: [],
+    tone: 'neutral',
+    range,
+  }
+}
+
 async function fetchFullPlatformStats(range = '24h') {
   const cachedStats = readCache(platformStatsCache, range)
 
@@ -2457,7 +2482,7 @@ async function fetchFullPlatformStats(range = '24h') {
     )
 
     const normalized = normalizePlatformStatsPayload(response?.data ?? response, 'live', range)
-    recordPlatformCurrentMetric(normalized.latest)
+    await recordPlatformCurrentMetric(normalized.latest)
     writeCache(platformStatsCache, range, normalized, getPlatformStatsCacheTtlMs(range))
     return normalized
   } catch (error) {
@@ -2476,6 +2501,34 @@ async function fetchFullPlatformStats(range = '24h') {
           source: 'cache',
         },
       }
+    }
+
+    const boardSnapshot = await fetchPlatformBoardPayload('24h').catch(() => null)
+    if (boardSnapshot?.leaderboard?.length) {
+      const latestValue = boardSnapshot.leaderboard.reduce(
+        (sum, game) => sum + (Number(game.playing) || 0),
+        0,
+      )
+      const fallback = buildPlatformStatsFallbackPayload(
+        latestValue,
+        new Date().toISOString(),
+        range,
+        'board_fallback',
+      )
+      writeCache(platformStatsCache, range, fallback, getPlatformStatsCacheTtlMs(range))
+      return fallback
+    }
+
+    const storedPoint = getPlatformCurrentMetric()
+    if (storedPoint?.timestamp && Number.isFinite(Number(storedPoint?.value))) {
+      const fallback = buildPlatformStatsFallbackPayload(
+        Number(storedPoint.value),
+        storedPoint.timestamp,
+        range,
+        'stored_fallback',
+      )
+      writeCache(platformStatsCache, range, fallback, getPlatformStatsCacheTtlMs(range))
+      return fallback
     }
 
     throw error
