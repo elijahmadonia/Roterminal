@@ -4023,17 +4023,42 @@ async function fetchPlatformBoardPayload(range = '24h') {
   }
 
   if (range === '24h') {
+    const snapshotBoard = await buildSnapshotBoardPayload()
     const storedBoard = await getBoardSnapshot(range)
+
+    if (snapshotBoard && storedBoard) {
+      const snapshotCount = Array.isArray(snapshotBoard.leaderboard)
+        ? snapshotBoard.leaderboard.length
+        : 0
+      const storedCount = Array.isArray(storedBoard.leaderboard)
+        ? storedBoard.leaderboard.length
+        : 0
+      const selectedBoard = snapshotCount >= storedCount ? snapshotBoard : storedBoard
+
+      writeCache(boardCache, range, selectedBoard, getBoardPayloadCacheTtlMs(range))
+
+      if (selectedBoard === snapshotBoard && snapshotCount > storedCount) {
+        await recordBoardSnapshot(range, snapshotBoard, {
+          observedAt: new Date().toISOString(),
+          source: snapshotBoard.ops?.source ?? 'database',
+        })
+      }
+
+      return selectedBoard
+    }
+
+    if (snapshotBoard) {
+      writeCache(boardCache, range, snapshotBoard, getBoardPayloadCacheTtlMs(range))
+      await recordBoardSnapshot(range, snapshotBoard, {
+        observedAt: new Date().toISOString(),
+        source: snapshotBoard.ops?.source ?? 'database',
+      })
+      return snapshotBoard
+    }
 
     if (storedBoard) {
       writeCache(boardCache, range, storedBoard, getBoardPayloadCacheTtlMs(range))
       return storedBoard
-    }
-
-    const snapshotBoard = await buildSnapshotBoardPayload()
-    if (snapshotBoard) {
-      writeCache(boardCache, range, snapshotBoard, getBoardPayloadCacheTtlMs(range))
-      return snapshotBoard
     }
   }
   try {
