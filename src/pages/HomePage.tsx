@@ -706,16 +706,6 @@ export default function HomePage({
                 onChange={handleGamesViewChange}
               />
 
-              <div
-                style={{
-                  color: TOKENS.colors.neutral3,
-                  fontSize: TOKENS.typography.body3.size,
-                  lineHeight: TOKENS.typography.body3.lineHeight,
-                }}
-              >
-                Showing {visibleTableRows.length} of {tableConfig.rows.length} indexed games on this board view.
-              </div>
-
               <GamesOverviewTable
                 variant="compact"
                 rows={visibleTableRows}
