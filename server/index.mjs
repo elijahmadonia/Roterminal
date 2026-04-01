@@ -113,6 +113,9 @@ const GAME_PAGE_SERVER_SAMPLE_MAX_PAGES = 10
 const GAME_PAGE_SERVER_SAMPLE_LIMIT = 100
 const GAME_PAGE_CREATOR_PORTFOLIO_LIMIT = 8
 const GAME_PAGE_COMPARABLE_LIMIT = 8
+const BOARD_LEADERBOARD_LIMIT = 50
+const BOARD_WATCHLIST_LIMIT = 200
+const GAME_PAGE_PEER_HISTORY_LIMIT = 80
 const SCREENER_STOPWORDS = new Set([
   'a',
   'about',
@@ -397,6 +400,29 @@ function parseChartRange(value, fallback = '24h') {
 
 function getHistoryCutoffIso() {
   return new Date(Date.now() - SNAPSHOT_RETENTION_MS).toISOString()
+}
+
+function getHistoryCutoffIsoForWindow(windowMs, paddingMs = ONE_HOUR_MS) {
+  const safeWindowMs = Number.isFinite(windowMs) ? Math.max(windowMs, ONE_HOUR_MS) : ONE_HOUR_MS
+  return new Date(Date.now() - safeWindowMs - Math.max(paddingMs, 0)).toISOString()
+}
+
+function getBoardHistoryCutoffIso(range = '24h') {
+  return getHistoryCutoffIsoForWindow(
+    Math.max(CHART_RANGE_MS[range] ?? ONE_DAY_MS, ONE_WEEK_MS),
+    6 * ONE_HOUR_MS,
+  )
+}
+
+function getGameHistoryCutoffIso(range = '24h') {
+  return getHistoryCutoffIsoForWindow(
+    Math.max(CHART_RANGE_MS[range] ?? ONE_DAY_MS, 90 * ONE_DAY_MS),
+    ONE_DAY_MS,
+  )
+}
+
+function getPeerHistoryCutoffIso() {
+  return getHistoryCutoffIsoForWindow(30 * ONE_DAY_MS, ONE_DAY_MS)
 }
 
 function formatTrendLabel(timestamp) {
@@ -1717,7 +1743,7 @@ function buildBoardPayload(
       ingestIntervalMinutes: Math.round(INGEST_INTERVAL_MS / 60_000),
       lastIngestedAt,
     },
-    leaderboard: enrichedGames.slice(0, 50).map((game) => ({
+    leaderboard: enrichedGames.slice(0, BOARD_LEADERBOARD_LIMIT).map((game) => ({
       universeId: game.universeId,
       name: game.name,
       creatorName: game.creatorName,
@@ -1748,7 +1774,7 @@ function buildBoardPayload(
       thumbnailUrl: game.thumbnailUrl,
       tone: game.tone,
     })),
-    watchlist: trackedEnrichedGames.map((game) => ({
+    watchlist: trackedEnrichedGames.slice(0, BOARD_WATCHLIST_LIMIT).map((game) => ({
       universeId: game.universeId,
       name: game.name,
       creator: game.creatorName,
@@ -2554,24 +2580,28 @@ async function fetchFullPlatformStats(range = '24h') {
 }
 
 async function fetchFullPlatformPointPayload() {
-  const cachedRanges = ['30m', '24h', '7d', '30d']
+  try {
+    const cachedRanges = ['30m', '24h', '7d', '30d']
 
-  for (const range of cachedRanges) {
-    const cachedStats = readCache(platformStatsCache, range)
+    for (const range of cachedRanges) {
+      const cachedStats = readCache(platformStatsCache, range)
 
-    if (cachedStats?.latest) {
-      return cachedStats.latest
+      if (cachedStats?.latest) {
+        return cachedStats.latest
+      }
     }
+
+    const storedPoint = getPlatformCurrentMetric()
+
+    if (storedPoint) {
+      return storedPoint
+    }
+
+    const payload = await fetchFullPlatformStats('24h')
+    return payload.latest
+  } catch (_error) {
+    return fetchBoardLivePointPayload()
   }
-
-  const storedPoint = getPlatformCurrentMetric()
-
-  if (storedPoint) {
-    return storedPoint
-  }
-
-  const payload = await fetchFullPlatformStats('24h')
-  return payload.latest
 }
 
 function decodeHtmlEntities(value) {
@@ -3344,6 +3374,22 @@ function computeComparableRevenueRange(game) {
   }
 }
 
+function selectGamePagePeerCandidates(targetGame, peerGames) {
+  return [...(Array.isArray(peerGames) ? peerGames : [])]
+    .filter((peer) => peer?.universeId && peer.universeId !== targetGame.universeId)
+    .sort((left, right) => {
+      const leftGenreMatch = left.genre === targetGame.genre ? 1 : 0
+      const rightGenreMatch = right.genre === targetGame.genre ? 1 : 0
+
+      if (leftGenreMatch !== rightGenreMatch) {
+        return rightGenreMatch - leftGenreMatch
+      }
+
+      return (Number(right.playing) || 0) - (Number(left.playing) || 0)
+    })
+    .slice(0, GAME_PAGE_PEER_HISTORY_LIMIT)
+}
+
 function computeComparables(game, peers) {
   const games = peers
     .filter((peer) => peer.universeId !== game.universeId)
@@ -3892,11 +3938,16 @@ async function fetchPlatformBoardPayload(range = '24h') {
     })
   }
 
+  const limitedTrackedGames = [...trackedLiveFallback.games]
+    .sort((left, right) => (Number(right.playing) || 0) - (Number(left.playing) || 0))
+    .slice(0, BOARD_WATCHLIST_LIMIT)
+  const limitedTrackedIds = limitedTrackedGames.map((game) => game.universeId)
+  const boardHistoryCutoffIso = getBoardHistoryCutoffIso(range)
   const platformHistoryMap = getHistoryMap(
     platformSet.discoveredUniverseIds,
-    getHistoryCutoffIso(),
+    boardHistoryCutoffIso,
   )
-  const trackedHistoryMap = getHistoryMap(trackedIds, getHistoryCutoffIso())
+  const trackedHistoryMap = getHistoryMap(limitedTrackedIds, boardHistoryCutoffIso)
 
   const payload = buildBoardPayload(
     platformSet.games,
@@ -3904,7 +3955,7 @@ async function fetchPlatformBoardPayload(range = '24h') {
     platformSet.source,
     range,
     {
-      games: trackedLiveFallback.games,
+      games: limitedTrackedGames,
       historyMap: trackedHistoryMap,
     },
     {
@@ -3939,90 +3990,129 @@ async function fetchGamePagePayload(universeId, range = '24h', detailLevel = 'fu
   if (cachedPayload) {
     return cachedPayload
   }
+  try {
+    const { games, source } = await fetchUniverseGames([universeId])
 
-  const { games, source } = await fetchUniverseGames([universeId])
+    if (games.length === 0) {
+      const error = new Error('Game not found.')
+      error.statusCode = 404
+      throw error
+    }
 
-  if (games.length === 0) {
-    const error = new Error('Game not found.')
-    error.statusCode = 404
-    throw error
-  }
+    if (source === 'live' && SERVER_ENABLE_SCHEDULED_INGEST) {
+      try {
+        recordSnapshots(games)
+      } catch (error) {
+        console.error(`[game-page] Failed to record live snapshot for ${universeId}`, error)
+      }
+    }
 
-  if (source === 'live' && SERVER_ENABLE_SCHEDULED_INGEST) {
+    let trackedUniverseIds = []
     try {
-      recordSnapshots(games)
+      trackedUniverseIds = appendTrackedUniverseIds([universeId], TRACKED_UNIVERSE_CAP)
     } catch (error) {
-      console.error(`[game-page] Failed to record live snapshot for ${universeId}`, error)
+      console.error(`[game-page] Failed to append tracked universe ${universeId}`, error)
+
+      try {
+        trackedUniverseIds = getTrackedUniverseIds()
+      } catch (trackedError) {
+        console.error('[game-page] Failed to read tracked universe ids after append failure', trackedError)
+        trackedUniverseIds = []
+      }
     }
-  }
 
-  let trackedUniverseIds = []
-  try {
-    trackedUniverseIds = appendTrackedUniverseIds([universeId], TRACKED_UNIVERSE_CAP)
-  } catch (error) {
-    console.error(`[game-page] Failed to append tracked universe ${universeId}`, error)
-
+    let historyMap = new Map()
     try {
-      trackedUniverseIds = getTrackedUniverseIds()
-    } catch (trackedError) {
-      console.error('[game-page] Failed to read tracked universe ids after append failure', trackedError)
-      trackedUniverseIds = []
+      historyMap = getHistoryMap([universeId], getGameHistoryCutoffIso(range))
+    } catch (error) {
+      console.error(`[game-page] Failed to read history for ${universeId}`, error)
     }
-  }
 
-  let historyMap = new Map()
-  try {
-    historyMap = getHistoryMap([universeId], getHistoryCutoffIso())
-  } catch (error) {
-    console.error(`[game-page] Failed to read history for ${universeId}`, error)
-  }
-
-  let peerGames = []
-  try {
-    peerGames = getLatestSnapshotGames(trackedUniverseIds)
-  } catch (error) {
-    console.error(`[game-page] Failed to read peer games for ${universeId}`, error)
-  }
-  const supplemental = await fetchGameSupplementalData(games[0], {
-    allowNetwork: detailLevel === 'full',
-  })
-  const payload = buildGameDetailPayload(
-    games[0],
-    historyMap,
-    peerGames,
-    trackedUniverseIds,
-    supplemental,
-    source,
-    range,
-  )
-
-  if (detailLevel === 'full') {
+    let peerGames = []
     try {
-      recordGamePageSnapshot(payload, {
-        source: `game_page_${source}`,
+      peerGames = getLatestSnapshotGames(trackedUniverseIds)
+    } catch (error) {
+      console.error(`[game-page] Failed to read peer games for ${universeId}`, error)
+    }
+    const peerCandidates = selectGamePagePeerCandidates(games[0], peerGames)
+    let peerHistoryMap = new Map()
+    try {
+      peerHistoryMap = getHistoryMap(
+        peerCandidates.map((peer) => peer.universeId),
+        getPeerHistoryCutoffIso(),
+      )
+    } catch (error) {
+      console.error(`[game-page] Failed to read peer history for ${universeId}`, error)
+    }
+    let supplemental = buildUnavailableGameSupplementalData(games[0])
+    try {
+      supplemental = await fetchGameSupplementalData(games[0], {
+        allowNetwork: detailLevel === 'full',
       })
     } catch (error) {
-      console.error(`[game-page] Failed to persist page snapshot for ${universeId}`, error)
+      console.error(`[game-page] Failed to fetch supplemental data for ${universeId}`, error)
     }
-  }
+    const payload = buildGameDetailPayload(
+      games[0],
+      historyMap,
+      peerCandidates,
+      peerHistoryMap,
+      trackedUniverseIds,
+      supplemental,
+      source,
+      range,
+    )
 
-  writeCache(
-    gamePageCache,
-    cacheKey,
-    payload,
-    getGamePagePayloadCacheTtlMs(range, detailLevel),
-  )
+    if (detailLevel === 'full') {
+      try {
+        recordGamePageSnapshot(payload, {
+          source: `game_page_${source}`,
+        })
+      } catch (error) {
+        console.error(`[game-page] Failed to persist page snapshot for ${universeId}`, error)
+      }
+    }
 
-  if (detailLevel === 'full') {
     writeCache(
       gamePageCache,
-      `${universeId}:${range}:core`,
+      cacheKey,
       payload,
-      getGamePagePayloadCacheTtlMs(range, 'full'),
+      getGamePagePayloadCacheTtlMs(range, detailLevel),
     )
-  }
 
-  return payload
+    if (detailLevel === 'full') {
+      writeCache(
+        gamePageCache,
+        `${universeId}:${range}:core`,
+        payload,
+        getGamePagePayloadCacheTtlMs(range, 'full'),
+      )
+    }
+
+    return payload
+  } catch (error) {
+    const stalePayload = readCacheEntry(gamePageCache, cacheKey)
+    if (stalePayload?.value) {
+      return stalePayload.value
+    }
+
+    const fallbackGame = getLatestSnapshotGames([universeId])[0]
+    if (fallbackGame) {
+      const trackedUniverseIds = getTrackedUniverseIds()
+      return buildGameDetailPayload(
+        fallbackGame,
+        getHistoryMap([universeId], getGameHistoryCutoffIso(range)),
+        [],
+        new Map(),
+        trackedUniverseIds,
+        buildUnavailableGameSupplementalData(fallbackGame),
+        'database',
+        range,
+      )
+    }
+
+    throw error
+  }
 }
 
 async function pollTrackedUniverses() {
@@ -4239,16 +4329,13 @@ function buildGameDetailPayload(
   game,
   historyMap,
   peerGames,
+  peerHistoryMap,
   trackedUniverseIds,
   supplemental,
   source,
   range = '24h',
 ) {
   const enrichedGame = enrichGames([game], historyMap)[0]
-  const peerHistoryMap = getHistoryMap(
-    peerGames.map((peer) => peer.universeId),
-    getHistoryCutoffIso(),
-  )
   const allPeers = enrichGames(peerGames, peerHistoryMap)
   const peers = allPeers
     .filter((peer) => peer.universeId !== enrichedGame.universeId)
